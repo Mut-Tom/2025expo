@@ -36,17 +36,23 @@
       Hikari: ["#f39800", "#e60012", "#ffd900"],
     };
 
-    // Cookie util
-    const setCookie = (name, value, days=180) => {
-      const d = new Date(); d.setTime(d.getTime() + days*24*60*60*1000);
-      document.cookie = `${name}=${encodeURIComponent(value)}; expires=${d.toUTCString()}; path=/; SameSite=Lax`;
+    // ---- localStorage helpers ----
+    const LS = {
+      get(key, def=null){ try{ const v = localStorage.getItem(key); return v ? JSON.parse(v) : def; }catch{ return def; } },
+      set(key, val){ localStorage.setItem(key, JSON.stringify(val)); },
+      del(key){ localStorage.removeItem(key); }
     };
-    const getCookie = (name) => {
-      const key = name + "=";
-      const arr = document.cookie.split(";").map(s=>s.trim());
-      for (const c of arr) if (c.indexOf(key) === 0) return decodeURIComponent(c.substring(key.length));
-      return null;
+
+    // 画像ごとのキーを作る（URL + 幅x高さ をハッシュ化）
+    const hashStr = (s) => { // djb2
+      let h = 5381; for (let i=0;i<s.length;i++) h = ((h<<5)+h) + s.charCodeAt(i);
+      return (h>>>0).toString(16);
     };
+
+    // 共通キー名
+    const LS_COLOR      = "mf_color";
+    const LS_RECENT     = "mf_recent";
+    const LS_ACTIONS_NS = "mf_actions:"; // ここに imageKey を連結
 
     function App() {
       const canvasRef = useRef(null);
@@ -54,16 +60,15 @@
       const fileInputRef = useRef(null);
 
       const [img, setImg] = useState(null);
+      const [imageKey, setImageKey] = useState(null); // 画像ごとの履歴キー
 
-      // 色（Cookie復元）
-      const cookieColor = getCookie("mapfill_color") || "#e60012";
-      const cookieRecent = (() => { try { return JSON.parse(getCookie("mapfill_recent") || "[]"); } catch { return []; } })();
+      // 色（復元）
+      const [color, setColor] = useState(LS.get(LS_COLOR, "#e60012"));
+      const [recentColors, setRecentColors] = useState(LS.get(LS_RECENT, [])); // 先頭が最新
 
-      const [color, setColor] = useState(cookieColor);
-      const [recentColors, setRecentColors] = useState(cookieRecent); // 先頭が最新
-      const [tolerance, setTolerance] = useState(48);
+      const [tolerance, setTolerance] = useState(28);
       const [contiguous, setContiguous] = useState(true);
-      const [mode, setMode] = useState("fill"); // UI非表示。F/I/Bで切替
+      const [mode, setMode] = useState("fill"); // F/I/Bで切替
       const [undoStack, setUndoStack] = useState([]);
       const [redoStack, setRedoStack] = useState([]);
       const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
@@ -83,7 +88,7 @@
         return () => { window.removeEventListener("drop", onDrop); window.removeEventListener("dragover", onDrag); };
       }, []);
 
-      // ショートカット（ツールUIなし）
+      // ショートカット
       useEffect(() => {
         const isEditable = (el) => {
           if (!el) return false;
@@ -97,24 +102,19 @@
           const shift = e.shiftKey;
           const key = e.key;
 
-          // Undo/Redo
           if (ctrl && key.toLowerCase() === "z" && !shift) { e.preventDefault(); undo(); return; }
           if ((ctrl && key.toLowerCase() === "y") || (ctrl && key.toLowerCase() === "z" && shift)) { e.preventDefault(); redo(); return; }
 
-          // ツール切替（UIなし）
           if (!ctrl && !shift && key.toLowerCase() === "f") { setMode("fill"); return; }
           if (!ctrl && !shift && key.toLowerCase() === "i") { setMode("eyedropper"); return; }
           if (!ctrl && !shift && key.toLowerCase() === "b") { setMode(m => m==="fill" ? "eyedropper" : "fill"); return; }
 
-          // ファイル/保存/リセット
           if (!ctrl && !shift && key.toLowerCase() === "s") { e.preventDefault(); savePng(); return; }
           if (!ctrl && !shift && key.toLowerCase() === "o") { e.preventDefault(); handleOpen(); return; }
-          if (!ctrl && !shift && key.toLowerCase() === "r") { e.preventDefault(); clearAll(); return; }
+          if (!ctrl && !shift && key.toLowerCase() === "r") { e.preventDefault(); clearToOriginal(); return; }
 
-          // 連結ON/OFF
           if (!ctrl && !shift && key.toLowerCase() === "g") { setContiguous(v => !v); return; }
 
-          // 許容差
           if (key === "[" || key === "-") { setTolerance(v => clampTol(v - 4)); return; }
           if (key === "]" || key === "=" || key === "+") { setTolerance(v => clampTol(v + 4)); return; }
         };
@@ -122,33 +122,49 @@
         return () => window.removeEventListener("keydown", onKeyDown);
       }, [undoStack, redoStack]);
 
-      // 色変更 → Cookie & 最近色
+      // 色 → 保存＆最近色に反映
       useEffect(() => {
-        setCookie("mapfill_color", color);
+        LS.set(LS_COLOR, color);
         setRecentColors((prev) => {
           const next = [color, ...prev.filter(c => c !== color)].slice(0, 12);
-          setCookie("mapfill_recent", JSON.stringify(next));
+          LS.set(LS_RECENT, next);
           return next;
         });
       }, [color]);
 
-      // 画像入出力
+      // ====== 画像入出力 ======
       const loadFile = (file) => {
         const reader = new FileReader();
-        reader.onload = () => { const image = new Image(); image.onload = () => afterImageLoaded(image); image.src = reader.result; };
+        reader.onload = () => {
+          const image = new Image();
+          image.onload = () => afterImageLoaded(image, file.name || "file");
+          image.src = reader.result;
+        };
         reader.readAsDataURL(file);
       };
       const autoLoadImage = (url) => new Promise((resolve, reject) => {
         if (!url) return reject();
         const image = new Image();
         image.crossOrigin = "anonymous";
-        image.onload = () => { afterImageLoaded(image); resolve(); };
+        image.onload = () => { afterImageLoaded(image, url); resolve(); };
         image.onerror = reject;
         image.src = url;
       });
-      const afterImageLoaded = (image) => {
-        setImg(image); layoutToViewport(image); drawImage(image);
-        setUndoStack([]); setRedoStack([]);
+      const afterImageLoaded = (image, srcHint) => {
+        setImg(image);
+        layoutToViewport(image);
+        drawImage(image);
+        setUndoStack([]);
+        setRedoStack([]);
+
+        // 画像ごとのキーを決定
+        const keySeed = (srcHint || image.src) + `@${image.width}x${image.height}`;
+        const key = LS_ACTIONS_NS + hashStr(keySeed);
+        setImageKey(key);
+
+        // 保存済み履歴があれば再生
+        const saved = LS.get(key, []);
+        if (saved?.length) replayActions(saved);
       };
       const drawImage = (image) => {
         const c = canvasRef.current, ctx = c.getContext("2d");
@@ -165,6 +181,8 @@
         o.style.width = w + "px"; o.style.height = h + "px";
         setCanvasSize({ w: image.width, h: image.height });
       };
+
+      // ====== ピクセル/色ユーティリティ ======
       const getImageXY = (evt) => {
         const rect = evt.target.getBoundingClientRect();
         const x = Math.floor(((evt.clientX - rect.left) * (canvasSize.w / rect.width)));
@@ -174,31 +192,9 @@
       const getPixel = (data, idx) => [data[idx], data[idx+1], data[idx+2], data[idx+3]];
       const colorDist = (a,b) => { const dr=a[0]-b[0], dg=a[1]-b[1], db=a[2]-b[2]; return Math.sqrt(dr*dr+dg*dg+db*db); };
       const hexToRgb = (hex) => { const m=/^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hex); return [parseInt(m[1],16),parseInt(m[2],16),parseInt(m[3],16)]; };
-
-      // Undo/Redo
-      const pushUndo = () => {
-        const c = canvasRef.current, ctx = c.getContext("2d");
-        const snap = ctx.getImageData(0,0,c.width,c.height);
-        setUndoStack(prev => { const next=[...prev, snap]; if(next.length>20) next.shift(); return next; });
-        setRedoStack([]);
-      };
-      const undo = () => {
-        const c = canvasRef.current, ctx = c.getContext("2d");
-        setUndoStack(prev => { if(!prev.length) return prev;
-          setRedoStack(r => [...r, ctx.getImageData(0,0,c.width,c.height)]);
-          const last = prev[prev.length-1]; ctx.putImageData(last,0,0); return prev.slice(0,-1);
-        });
-      };
-      const redo = () => {
-        const c = canvasRef.current, ctx = c.getContext("2d");
-        setRedoStack(prev => { if(!prev.length) return prev;
-          setUndoStack(u => [...u, ctx.getImageData(0,0,c.width,c.height)]);
-          const last = prev[prev.length-1]; ctx.putImageData(last,0,0); return prev.slice(0,-1);
-        });
-      };
-
-      // 塗りつぶし
       const match = (pix,target,tol) => colorDist(pix,target) <= tol;
+
+      // ====== 塗り（連結/全体） ======
       const floodFillContiguous = (data,w,h,sx,sy,target,fill,tol) => {
         const visited = new Uint8Array(w*h), q=[[sx,sy]];
         while(q.length){
@@ -215,6 +211,51 @@
         }}
       };
 
+      // ====== 操作適用（クリック時＆履歴再生時で共通） ======
+      const applyFillAt = ({x, y, colorHex, tol, contig}) => {
+        if (!img) return;
+        const c = canvasRef.current;
+        const ctx = c.getContext("2d", { willReadFrequently: true });
+        const imgData = ctx.getImageData(0,0,c.width,c.height);
+        const data = imgData.data;
+        const idx0 = (y * c.width + x) * 4;
+
+        const target = [data[idx0], data[idx0+1], data[idx0+2]];
+        const fillCol = hexToRgb(colorHex);
+        if (colorDist(target, fillCol) <= 1) return;
+
+        if (contig) floodFillContiguous(data, c.width, c.height, x, y, target, fillCol, tol);
+        else floodFillGlobal(data, c.width, c.height, target, fillCol, tol);
+
+        ctx.putImageData(imgData, 0, 0);
+      };
+
+      // 履歴再生
+      const replayActions = (actions) => {
+        if (!actions || !actions.length) return;
+        const c = canvasRef.current;
+        const ctx = c.getContext("2d", { willReadFrequently: true });
+        let imgData = ctx.getImageData(0,0,c.width,c.height);
+        let data = imgData.data;
+        for (const a of actions) {
+          const {x,y,colorHex,tol,contig} = a;
+          const idx0 = (y * c.width + x) * 4;
+          const target = [data[idx0], data[idx0+1], data[idx0+2]];
+          const fillCol = hexToRgb(colorHex);
+          if (colorDist(target, fillCol) <= 1) continue;
+          if (contig) {
+            ctx.putImageData(imgData, 0, 0);
+            applyFillAt({x,y,colorHex,tol,contig});
+            imgData = ctx.getImageData(0,0,c.width,c.height);
+            data = imgData.data;
+          } else {
+            floodFillGlobal(data, c.width, c.height, target, fillCol, tol);
+          }
+        }
+        ctx.putImageData(imgData, 0, 0);
+      };
+
+      // ====== クリック ======
       const handleCanvasClick = (e) => {
         if (!img) return;
         const { x, y } = getImageXY(e);
@@ -228,21 +269,100 @@
           setMode("fill");
           return;
         }
-        const target = [data[idx0], data[idx0+1], data[idx0+2]];
-        const fillCol = hexToRgb(color);
-        if (colorDist(target, fillCol) <= 1) return;
 
+        // Undoスナップショット
         pushUndo();
-        if (contiguous) floodFillContiguous(data, c.width, c.height, x, y, target, fillCol, tolerance);
-        else floodFillGlobal(data, c.width, c.height, target, fillCol, tolerance);
-        ctx.putImageData(imgData, 0, 0);
+
+        // 適用
+        const action = { x, y, colorHex: color, tol: tolerance, contig: contiguous };
+        applyFillAt(action);
+
+        // 履歴保存（画像ごと）
+        if (imageKey) {
+          try {
+            const prev = LS.get(imageKey, []);
+            const next = [...prev, action];
+            LS.set(imageKey, next);
+          } catch (err) {
+            console.warn("localStorage 保存に失敗：", err);
+            alert("保存容量がいっぱいの可能性があります。右パネルの「エクスポート」でバックアップしてから、履歴をクリアしてください。");
+          }
+        }
       };
 
-      // ファイル操作
+      // ====== Undo/Redo ======
+      const pushUndo = () => {
+        const c = canvasRef.current, ctx = c.getContext("2d");
+        const snap = ctx.getImageData(0,0,c.width,c.height);
+        setUndoStack(prev => { const next=[...prev, snap]; if(next.length>20) next.shift(); return next; });
+        setRedoStack([]);
+      };
+      const undo = () => {
+        const c = canvasRef.current, ctx = c.getContext("2d");
+        setUndoStack(prev => { if(!prev.length) return prev;
+          setRedoStack(r => [...r, ctx.getImageData(0,0,c.width,c.height)]);
+          const last = prev[prev.length-1]; ctx.putImageData(last,0,0);
+          // localStorage 側の履歴も1件戻す
+          if (imageKey) {
+            const log = LS.get(imageKey, []);
+            if (log.length) { log.pop(); LS.set(imageKey, log); }
+          }
+          return prev.slice(0,-1);
+        });
+      };
+      const redo = () => {
+        const c = canvasRef.current, ctx = c.getContext("2d");
+        setRedoStack(prev => { if(!prev.length) return prev;
+          setUndoStack(u => [...u, ctx.getImageData(0,0,c.width,c.height)]);
+          const last = prev[prev.length-1]; ctx.putImageData(last,0,0);
+          return prev.slice(0,-1);
+        });
+      };
+
+      // ====== ファイル操作 ======
       const handleOpen = () => fileInputRef.current?.click();
       const handleFile = (e) => { const f = e.target.files?.[0]; if (f) loadFile(f); };
       const savePng = () => { const a=document.createElement("a"); a.download="colored-map.png"; a.href=canvasRef.current.toDataURL("image/png"); a.click(); };
-      const clearAll = () => { if(!img) return; drawImage(img); setUndoStack([]); setRedoStack([]); };
+
+      // ====== 履歴クリア（画像ごと） ======
+      const clearToOriginal = () => {
+        if (!img) return;
+        drawImage(img);
+        setUndoStack([]); setRedoStack([]);
+        if (imageKey) LS.del(imageKey);
+      };
+
+      // ====== エクスポート / インポート ======
+      const exportState = () => {
+        if (!imageKey) return;
+        const data = {
+          imageKey,
+          actions: LS.get(imageKey, []),
+          meta: { ts: Date.now(), tolerance, contiguous }
+        };
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        const a = document.createElement("a");
+        a.download = `mapfill_${imageKey}.json`;
+        a.href = URL.createObjectURL(blob);
+        a.click();
+      };
+      const importState = (file) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const data = JSON.parse(reader.result);
+            if (!data || !Array.isArray(data.actions)) throw new Error("invalid json");
+            // 別画像キーのデータでも、今の画像に上書き適用して保存
+            LS.set(imageKey, data.actions);
+            // 再描画
+            drawImage(img);
+            replayActions(data.actions);
+          } catch (e) {
+            alert("インポートに失敗しました。JSON形式をご確認ください。");
+          }
+        };
+        reader.readAsText(file);
+      };
 
       return (
         <div className="min-h-screen w-full">
@@ -254,12 +374,12 @@
                 <button onClick={savePng} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">PNG保存 <span className="text-xs text-gray-500 ml-1">(S)</span></button>
                 <button onClick={undo} disabled={!undoStack.length} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">Undo <span className="text-xs text-gray-500 ml-1">(⌘/Ctrl+Z)</span></button>
                 <button onClick={redo} disabled={!redoStack.length} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">Redo <span className="text-xs text-gray-500 ml-1">(⌘/Ctrl+Shift+Z / Y)</span></button>
-                <button onClick={clearAll} disabled={!img} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">リセット <span className="text-xs text-gray-500 ml-1">(R)</span></button>
+                <button onClick={clearToOriginal} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">状態クリア <span className="text-xs text-gray-500 ml-1">(R)</span></button>
               </div>
             </div>
           </header>
 
-          <main className="mx-auto max-w-screen-2xl p-6 grid grid-cols-1 lg:grid-cols-[_1fr_360px] gap-6">
+          <main className="mx-auto max-w-screen-2xl p-6 grid grid-cols-1 lg:grid-cols-[_1fr_380px] gap-6">
             <div className="relative rounded-2xl bg-white border shadow overflow-auto p-4 flex justify-center">
               <div className="relative">
                 <canvas ref={canvasRef} className="rounded-xl shadow border select-none touch-none" onClick={handleCanvasClick} />
@@ -274,14 +394,16 @@
             </div>
 
             <aside className="rounded-2xl bg-white border shadow p-4 flex flex-col gap-5">
+              <div className="text-xs text-gray-500">保存先: localStorage（画像ごとに分離）</div>
+
               <div>
                 <div className="text-sm font-semibold mb-1">現在の色</div>
                 <input type="color" className="w-full h-10 rounded-lg border" value={color} onChange={(e)=>setColor(e.target.value)} />
               </div>
 
-              {/* 最近使った色（Cookie保存） */}
+              {/* 最近使った色 */}
               <div>
-                <div className="text-sm font-semibold mb-1">最近使った色（Cookie保存）</div>
+                <div className="text-sm font-semibold mb-1">最近使った色</div>
                 <div className="grid grid-cols-6 gap-2">
                   {recentColors.length === 0 ? (
                     <div className="text-xs text-gray-500 col-span-6">まだありません。色を選んで塗るとここに貯まります。</div>
@@ -293,7 +415,7 @@
                 </div>
               </div>
 
-              {/* 固定パレット（全部表示） */}
+              {/* 固定パレット */}
               {Object.entries(PALETTE_GROUPS).map(([label, list]) => (
                 <div key={label}>
                   <div className="text-sm font-semibold mb-1">{label}</div>
@@ -318,20 +440,12 @@
                 </label>
               </div>
 
-              <div className="border-t pt-3 text-xs text-gray-600 leading-relaxed">
-                <p className="font-semibold mb-1">ショートカット</p>
-                <div className="grid grid-cols-2 gap-x-3 gap-y-1">
-                  <div><kbd>⌘/Ctrl</kbd> + <kbd>Z</kbd> Undo</div>
-                  <div><kbd>⌘/Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Z</kbd> / <kbd>Y</kbd> Redo</div>
-                  <div><kbd>F</kbd> 塗りつぶし</div>
-                  <div><kbd>I</kbd> スポイト</div>
-                  <div><kbd>B</kbd> ツール切替</div>
-                  <div><kbd>S</kbd> 保存</div>
-                  <div><kbd>O</kbd> 画像を開く</div>
-                  <div><kbd>R</kbd> リセット</div>
-                  <div><kbd>G</kbd> 連結 ON/OFF</div>
-                  <div><kbd>[</kbd>/<kbd>]</kbd> 許容差 ±4</div>
-                </div>
+              <div className="border-t pt-3 flex items-center gap-2">
+                <button onClick={exportState} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border text-sm">エクスポート</button>
+                <label className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border text-sm cursor-pointer">
+                  インポート
+                  <input type="file" accept="application/json" className="hidden" onChange={(e)=>{ const f=e.target.files?.[0]; if(f) importState(f); e.target.value=""; }} />
+                </label>
               </div>
 
               <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFile} />
@@ -339,7 +453,7 @@
           </main>
 
           <footer className="py-6 text-center text-xs text-gray-500">
-            画像は端末内でのみ処理されます（PNG保存対応）。色設定はCookieで一時保存します。
+            画像は端末内でのみ処理されます（PNG保存対応）。塗り状態は localStorage に操作履歴として保存・復元します。
           </footer>
         </div>
       );
