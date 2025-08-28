@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>クリック塗りつぶしマップ</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css">
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    html,body { height: 100%; }
+    .touch-none { touch-action: none; }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useEffect, useRef, useState } = React;
+
+    // ★ デフォルトで読み込む画像（index.htmlと同じ階層に置く）
+    const DEFAULT_IMAGE = "map.png";
+
+    // URLクエリ ?img= の値を取得（ファイル名 or 直リンクURL）
+    const getImgFromQuery = () => {
+      const p = new URLSearchParams(location.search);
+      const v = p.get("img");
+      return v && v.trim() ? v.trim() : null;
+    };
+
+    function App() {
+      const canvasRef = useRef(null);
+      const overlayRef = useRef(null);
+      const fileInputRef = useRef(null);
+
+      const [img, setImg] = useState(null);
+      const [color, setColor] = useState("#19c37d");
+      const [tolerance, setTolerance] = useState(28);
+      const [contiguous, setContiguous] = useState(true);
+      const [mode, setMode] = useState("fill");
+      const [undoStack, setUndoStack] = useState([]);
+      const [redoStack, setRedoStack] = useState([]);
+      const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
+
+      // 初期表示で自動読み込み
+      useEffect(() => {
+        const first = getImgFromQuery() || DEFAULT_IMAGE;
+        autoLoadImage(first).catch(() => {
+          // 404等なら何もせず（手動読み込みに任せる）
+          console.warn("自動読み込み用の画像が見つかりません:", first);
+        });
+      }, []);
+
+      // D&D 読み込み
+      useEffect(() => {
+        const onDrop = (e) => {
+          e.preventDefault();
+          const file = e.dataTransfer?.files?.[0];
+          if (file) loadFile(file);
+        };
+        const onDrag = (e) => e.preventDefault();
+        window.addEventListener("drop", onDrop);
+        window.addEventListener("dragover", onDrag);
+        return () => {
+          window.removeEventListener("drop", onDrop);
+          window.removeEventListener("dragover", onDrag);
+        };
+      }, []);
+
+      const loadFile = (file) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const image = new Image();
+          image.onload = () => afterImageLoaded(image);
+          image.src = reader.result;
+        };
+        reader.readAsDataURL(file);
+      };
+
+      // 相対パス or 絶対URLを指定して読み込み
+      const autoLoadImage = (url) => new Promise((resolve, reject) => {
+        if (!url) return reject();
+        const image = new Image();
+        // 同一オリジン内のファイルはそのままでOK。外部URLはCORS許可が必要。
+        image.crossOrigin = "anonymous";
+        image.onload = () => { afterImageLoaded(image); resolve(); };
+        image.onerror = reject;
+        image.src = url;
+      });
+
+      const afterImageLoaded = (image) => {
+        setImg(image);
+        layoutToViewport(image);
+        drawImage(image);
+        setUndoStack([]);
+        setRedoStack([]);
+      };
+
+      const drawImage = (image) => {
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(image, 0, 0, image.width, image.height, 0, 0, canvas.width, canvas.height);
+      };
+
+      const layoutToViewport = (image) => {
+        const maxW = Math.min(window.innerWidth - 360, 1400);
+        const ratio = Math.min(1, maxW / image.width);
+        const w = Math.round(image.width * ratio);
+        const h = Math.round(image.height * ratio);
+
+        const canvas = canvasRef.current;
+        const overlay = overlayRef.current;
+
+        canvas.width = image.width;
+        canvas.height = image.height;
+        overlay.width = image.width;
+        overlay.height = image.height;
+
+        canvas.style.width = w + "px";
+        canvas.style.height = h + "px";
+        overlay.style.width = w + "px";
+        overlay.style.height = h + "px";
+
+        setCanvasSize({ w: image.width, h: image.height });
+      };
+
+      const getImageXY = (evt) => {
+        const rect = evt.target.getBoundingClientRect();
+        const x = Math.floor(((evt.clientX - rect.left) * (canvasSize.w / rect.width)));
+        const y = Math.floor(((evt.clientY - rect.top) * (canvasSize.h / rect.height)));
+        return { x, y };
+      };
+
+      const getPixel = (data, idx) => [data[idx], data[idx+1], data[idx+2], data[idx+3]];
+      const colorDist = (a, b) => {
+        const dr = a[0]-b[0], dg=a[1]-b[1], db=a[2]-b[2];
+        return Math.sqrt(dr*dr + dg*dg + db*db);
+      };
+      const hexToRgb = (hex) => {
+        const m = /^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hex);
+        return [parseInt(m[1],16), parseInt(m[2],16), parseInt(m[3],16)];
+      };
+
+      const pushUndo = () => {
+        const c = canvasRef.current;
+        const ctx = c.getContext("2d");
+        const snap = ctx.getImageData(0, 0, c.width, c.height);
+        setUndoStack(prev => {
+          const next = [...prev, snap];
+          if (next.length > 20) next.shift();
+          return next;
+        });
+        setRedoStack([]);
+      };
+
+      const undo = () => {
+        const c = canvasRef.current;
+        const ctx = c.getContext("2d");
+        setUndoStack(prev => {
+          if (!prev.length) return prev;
+          setRedoStack(r => [...r, ctx.getImageData(0,0,c.width,c.height)]);
+          const last = prev[prev.length-1];
+          ctx.putImageData(last, 0, 0);
+          return prev.slice(0,-1);
+        });
+      };
+
+      const redo = () => {
+        const c = canvasRef.current;
+        const ctx = c.getContext("2d");
+        setRedoStack(prev => {
+          if (!prev.length) return prev;
+          setUndoStack(u => [...u, ctx.getImageData(0,0,c.width,c.height)]);
+          const last = prev[prev.length-1];
+          ctx.putImageData(last, 0, 0);
+          return prev.slice(0,-1);
+        });
+      };
+
+      const match = (pix, target, tol) => colorDist(pix, target) <= tol;
+
+      const floodFillContiguous = (data, w, h, sx, sy, target, fill, tol) => {
+        const visited = new Uint8Array(w*h);
+        const q = [[sx, sy]];
+        while (q.length) {
+          const [x, y] = q.pop();
+          if (x < 0 || y < 0 || x >= w || y >= h) continue;
+          const idx = (y*w + x)*4;
+          if (visited[y*w + x]) continue;
+          const pix = [data[idx], data[idx+1], data[idx+2]];
+          if (!match(pix, target, tol)) continue;
+          visited[y*w + x] = 1;
+          data[idx] = fill[0];
+          data[idx+1] = fill[1];
+          data[idx+2] = fill[2];
+          data[idx+3] = 255;
+          q.push([x+1,y], [x-1,y], [x,y+1], [x,y-1]);
+        }
+      };
+
+      const floodFillGlobal = (data, w, h, target, fill, tol) => {
+        for (let y=0;y<h;y++){
+          for (let x=0;x<w;x++){
+            const idx = (y*w + x)*4;
+            const pix = [data[idx], data[idx+1], data[idx+2]];
+            if (match(pix, target, tol)) {
+              data[idx] = fill[0];
+              data[idx+1] = fill[1];
+              data[idx+2] = fill[2];
+              data[idx+3] = 255;
+            }
+          }
+        }
+      };
+
+      const handleCanvasClick = (e) => {
+        if (!img) return;
+        const { x, y } = getImageXY(e);
+        const c = canvasRef.current;
+        const ctx = c.getContext("2d", { willReadFrequently: true });
+        const imgData = ctx.getImageData(0, 0, c.width, c.height);
+        const data = imgData.data;
+        const idx0 = (y * c.width + x) * 4;
+
+        if (mode === "eyedropper") {
+          const [r,g,b] = getPixel(data, idx0);
+          setColor("#" + [r,g,b].map(v=>v.toString(16).padStart(2,"0")).join(""));
+          setMode("fill");
+          return;
+        }
+        const target = [data[idx0], data[idx0+1], data[idx0+2]];
+        const fillCol = hexToRgb(color);
+        if (colorDist(target, fillCol) <= 1) return;
+
+        pushUndo();
+        if (contiguous) {
+          floodFillContiguous(data, c.width, c.height, x, y, target, fillCol, tolerance);
+        } else {
+          floodFillGlobal(data, c.width, c.height, target, fillCol, tolerance);
+        }
+        ctx.putImageData(imgData, 0, 0);
+      };
+
+      const handleOpen = () => fileInputRef.current?.click();
+      const handleFile = (e) => {
+        const f = e.target.files?.[0];
+        if (f) loadFile(f);
+      };
+
+      const savePng = () => {
+        const a = document.createElement("a");
+        a.download = "colored-map.png";
+        a.href = canvasRef.current.toDataURL("image/png");
+        a.click();
+      };
+
+      const clearAll = () => {
+        if (!img) return;
+        drawImage(img);
+        setUndoStack([]);
+        setRedoStack([]);
+      };
+
+      const palette = [
+        "#19c37d", "#10a37f", "#ffb300", "#ff6b6b", "#00bcd4",
+        "#7c4dff", "#e91e63", "#607d8b", "#8bc34a", "#795548",
+      ];
+
+      return (
+        <div className="min-h-screen w-full">
+          <header className="sticky top-0 z-20 border-b bg-white bg-opacity-80 backdrop-filter backdrop-blur">
+            <div className="mx-auto max-w-screen-2xl px-6 py-3 flex items-center gap-3">
+              <div className="text-xl font-bold">クリックで塗りつぶせるマップ</div>
+              <div className="ml-auto flex gap-2">
+                <button onClick={handleOpen} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">画像を開く</button>
+                <button onClick={savePng} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">PNG保存</button>
+                <button onClick={undo} disabled={!undoStack.length} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">Undo</button>
+                <button onClick={redo} disabled={!redoStack.length} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">Redo</button>
+                <button onClick={clearAll} disabled={!img} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">リセット</button>
+              </div>
+            </div>
+          </header>
+
+          <main className="mx-auto max-w-screen-2xl p-6 grid grid-cols-1 lg:grid-cols-[_1fr_320px] gap-6">
+            <div className="relative rounded-2xl bg-white border shadow overflow-auto p-4 flex justify-center">
+              <div className="relative">
+                <canvas ref={canvasRef} className="rounded-xl shadow border select-none touch-none" onClick={handleCanvasClick} />
+                <canvas ref={overlayRef} className="absolute inset-0 pointer-events-none rounded-xl" />
+                {!img && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-6 text-gray-500">
+                    <div className="text-lg font-semibold mb-2">自動読み込み対象の画像が見つかりませんでした。</div>
+                    <div className="text-sm">`{DEFAULT_IMAGE}` を index.html と同じ階層に置くか、右上「画像を開く」から読み込んでください。<br/>または <code>?img=ファイル名.png</code> / <code>?img=https://...</code> をURLに付けて開けます。</div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <aside className="rounded-2xl bg-white border shadow p-4 flex flex-col gap-4">
+              <div>
+                <div className="text-sm font-semibold mb-1">ツール</div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button className={"px-3 py-2 rounded-xl border " + (mode==="fill" ? "bg-gray-900 text-white" : "bg-white")} onClick={()=>setMode("fill")}>塗りつぶし</button>
+                  <button className={"px-3 py-2 rounded-xl border " + (mode==="eyedropper" ? "bg-gray-900 text-white" : "bg-white")} onClick={()=>setMode("eyedropper")}>スポイト</button>
+                </div>
+              </div>
+
+              <div>
+                <div className="text-sm font-semibold mb-1">色</div>
+                <input type="color" className="w-full h-10 rounded-lg border" value={color} onChange={(e)=>setColor(e.target.value)} />
+                <div className="mt-2 grid grid-cols-5 gap-2">
+                  {palette.map((p)=>(
+                    <button key={p} onClick={()=>setColor(p)} className="h-8 rounded-lg border" style={{background:p}} aria-label={p}></button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <div className="text-sm font-semibold mb-1">許容差（輪郭のにじみ対策）</div>
+                <input type="range" min="0" max="128" value={tolerance} onChange={(e)=>setTolerance(parseInt(e.target.value))} className="w-full" />
+                <div className="text-xs text-gray-600">現在: {tolerance}</div>
+              </div>
+
+              <div className="flex items-center justify-between">
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={contiguous} onChange={(e)=>setContiguous(e.target.checked)} />
+                  連結のみを塗る（ON 推奨）
+                </label>
+              </div>
+
+              <div className="border-t pt-3 text-xs text-gray-600 leading-relaxed">
+                <p>コツ:</p>
+                <ul className="list-disc ml-4 mt-1 space-y-1">
+                  <li>漏れる時は「許容差」を下げる / 連結ON。</li>
+                  <li>境界色をスポイト→別色に置換→塗り、で精度UP。</li>
+                  <li>Undo/Redo は 20 段階。</li>
+                </ul>
+              </div>
+
+              <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFile} />
+            </aside>
+          </main>
+
+          <footer className="py-6 text-center text-xs text-gray-500">
+            画像は端末内でのみ処理されます（PNG保存対応）。
+          </footer>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
