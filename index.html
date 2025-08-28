@@ -20,7 +20,6 @@
   <script type="text/babel">
     const { useEffect, useRef, useState } = React;
 
-    // ---- 自動読み込みする画像名（index.html と同階層） ----
     const DEFAULT_IMAGE = "map.png";
     const getImgFromQuery = () => {
       const p = new URLSearchParams(location.search);
@@ -28,7 +27,6 @@
       return v && v.trim() ? v.trim() : null;
     };
 
-    // ---- テーマ別パレット（表示は全部並べる / タブなし） ----
     const PALETTE_GROUPS = {
       Inochi: ["#e60012", "#0068b7", "#ffffff"],
       Umi:    ["#9b89c6", "#0095b6", "#82cddd", "#8fc31f"],
@@ -36,7 +34,6 @@
       Hikari: ["#f39800", "#e60012", "#ffd900"],
     };
 
-    // ---- Cookie ユーティリティ ----
     const setCookie = (name, value, days=180) => {
       const d = new Date(); d.setTime(d.getTime() + days*24*60*60*1000);
       document.cookie = `${name}=${encodeURIComponent(value)}; expires=${d.toUTCString()}; path=/; SameSite=Lax`;
@@ -55,30 +52,25 @@
 
       const [img, setImg] = useState(null);
 
-      // ---- 色まわり（Cookie復元）----
-      const cookieColor = getCookie("mapfill_color") || "#e60012"; // 既定：Inochi赤
+      const cookieColor = getCookie("mapfill_color") || "#e60012";
       const cookieRecent = (() => {
         try { return JSON.parse(getCookie("mapfill_recent") || "[]"); } catch { return []; }
       })();
 
       const [color, setColor] = useState(cookieColor);
-      const [recentColors, setRecentColors] = useState(cookieRecent); // 先頭が最新
+      const [recentColors, setRecentColors] = useState(cookieRecent);
       const [tolerance, setTolerance] = useState(28);
       const [contiguous, setContiguous] = useState(true);
-      const [mode, setMode] = useState("fill"); // "fill" | "eyedropper"
+      const [mode, setMode] = useState("fill");
       const [undoStack, setUndoStack] = useState([]);
       const [redoStack, setRedoStack] = useState([]);
       const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
 
-      // 初期表示で自動読み込み
       useEffect(() => {
         const first = getImgFromQuery() || DEFAULT_IMAGE;
-        autoLoadImage(first).catch(() => {
-          console.warn("自動読み込み用の画像が見つかりません:", first);
-        });
+        autoLoadImage(first).catch(() => console.warn("自動読み込み用の画像が見つかりません:", first));
       }, []);
 
-      // D&D 読み込み
       useEffect(() => {
         const onDrop = (e) => { e.preventDefault(); const f = e.dataTransfer?.files?.[0]; if (f) loadFile(f); };
         const onDrag = (e) => e.preventDefault();
@@ -87,7 +79,6 @@
         return () => { window.removeEventListener("drop", onDrop); window.removeEventListener("dragover", onDrag); };
       }, []);
 
-      // ---- キーボードショートカット（タブ関連は削除）----
       useEffect(() => {
         const isEditable = (el) => {
           if (!el) return false;
@@ -121,7 +112,6 @@
         return () => window.removeEventListener("keydown", onKeyDown);
       }, [undoStack, redoStack]);
 
-      // ---- 色が変わったら Cookie 更新・最近色に追加 ----
       useEffect(() => {
         setCookie("mapfill_color", color);
         setRecentColors((prev) => {
@@ -131,7 +121,6 @@
         });
       }, [color]);
 
-      // 画像読み込み系
       const loadFile = (file) => {
         const reader = new FileReader();
         reader.onload = () => { const image = new Image(); image.onload = () => afterImageLoaded(image); image.src = reader.result; };
@@ -282,7 +271,7 @@
                 <input type="color" className="w-full h-10 rounded-lg border" value={color} onChange={(e)=>setColor(e.target.value)} />
               </div>
 
-              <!-- 最近使った色（Cookie保存） -->
+              {/* 最近使った色（Cookie保存） */}
               <div>
                 <div className="text-sm font-semibold mb-1">最近使った色（Cookie保存）</div>
                 <div className="grid grid-cols-6 gap-2">
@@ -296,13 +285,13 @@
                 </div>
               </div>
 
-              <!-- 固定パレット（タブなしで全部表示） -->
+              {/* 固定パレット（タブなしで全部表示） */}
               {Object.entries(PALETTE_GROUPS).map(([label, list]) => (
                 <div key={label}>
                   <div className="text-sm font-semibold mb-1">{label}</div>
                   <div className="grid grid-cols-6 gap-2">
-                    {list.map((p)=>(
-                      <button key={p} onClick={()=>setColor(p)} className="h-9 rounded-lg border" style={{background:p}} aria-label={p} title={p}></button>
+                    {list.map((p,idx)=>(
+                      <button key={p+idx} onClick={()=>setColor(p)} className="h-9 rounded-lg border" style={{background:p}} aria-label={p} title={p}></button>
                     ))}
                   </div>
                 </div>
