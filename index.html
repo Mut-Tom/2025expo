@@ -11,11 +11,7 @@
   <style>
     html,body { height: 100%; }
     .touch-none { touch-action: none; }
-    kbd {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      background: #f5f5f5; border: 1px solid #ddd; border-bottom-width: 2px; padding: 2px 6px; border-radius: 6px;
-      font-size: 12px;
-    }
+    kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;background:#f5f5f5;border:1px solid #ddd;border-bottom-width:2px;padding:2px 6px;border-radius:6px;font-size:12px;}
   </style>
 </head>
 <body class="bg-gray-50 text-gray-900">
@@ -24,7 +20,7 @@
   <script type="text/babel">
     const { useEffect, useRef, useState } = React;
 
-    // 自動読み込みする画像名（index.html と同じ階層）
+    // ---- 自動読み込みする画像名（index.html と同階層） ----
     const DEFAULT_IMAGE = "map.png";
     const getImgFromQuery = () => {
       const p = new URLSearchParams(location.search);
@@ -32,14 +28,25 @@
       return v && v.trim() ? v.trim() : null;
     };
 
-    // ★ テーマ別パレット
+    // ---- テーマ別パレット（表示は全部並べる / タブなし） ----
     const PALETTE_GROUPS = {
       Inochi: ["#e60012", "#0068b7", "#ffffff"],
       Umi:    ["#9b89c6", "#0095b6", "#82cddd", "#8fc31f"],
       Noyama: ["#c5d200", "#fff100", "#0072bc"],
       Hikari: ["#f39800", "#e60012", "#ffd900"],
     };
-    const GROUP_ORDER = ["Inochi", "Umi", "Noyama", "Hikari"];
+
+    // ---- Cookie ユーティリティ ----
+    const setCookie = (name, value, days=180) => {
+      const d = new Date(); d.setTime(d.getTime() + days*24*60*60*1000);
+      document.cookie = `${name}=${encodeURIComponent(value)}; expires=${d.toUTCString()}; path=/; SameSite=Lax`;
+    };
+    const getCookie = (name) => {
+      const key = name + "=";
+      const arr = document.cookie.split(";").map(s=>s.trim());
+      for (const c of arr) { if (c.indexOf(key) === 0) return decodeURIComponent(c.substring(key.length)); }
+      return null;
+    };
 
     function App() {
       const canvasRef = useRef(null);
@@ -47,14 +54,21 @@
       const fileInputRef = useRef(null);
 
       const [img, setImg] = useState(null);
-      const [color, setColor] = useState("#e60012"); // 初期色：Inochiの赤
-      const [tolerance, setTolerance] = useState(48);
+
+      // ---- 色まわり（Cookie復元）----
+      const cookieColor = getCookie("mapfill_color") || "#e60012"; // 既定：Inochi赤
+      const cookieRecent = (() => {
+        try { return JSON.parse(getCookie("mapfill_recent") || "[]"); } catch { return []; }
+      })();
+
+      const [color, setColor] = useState(cookieColor);
+      const [recentColors, setRecentColors] = useState(cookieRecent); // 先頭が最新
+      const [tolerance, setTolerance] = useState(28);
       const [contiguous, setContiguous] = useState(true);
       const [mode, setMode] = useState("fill"); // "fill" | "eyedropper"
       const [undoStack, setUndoStack] = useState([]);
       const [redoStack, setRedoStack] = useState([]);
       const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
-      const [activeGroup, setActiveGroup] = useState("Inochi");
 
       // 初期表示で自動読み込み
       useEffect(() => {
@@ -66,21 +80,14 @@
 
       // D&D 読み込み
       useEffect(() => {
-        const onDrop = (e) => {
-          e.preventDefault();
-          const file = e.dataTransfer?.files?.[0];
-          if (file) loadFile(file);
-        };
+        const onDrop = (e) => { e.preventDefault(); const f = e.dataTransfer?.files?.[0]; if (f) loadFile(f); };
         const onDrag = (e) => e.preventDefault();
         window.addEventListener("drop", onDrop);
         window.addEventListener("dragover", onDrag);
-        return () => {
-          window.removeEventListener("drop", onDrop);
-          window.removeEventListener("dragover", onDrag);
-        };
+        return () => { window.removeEventListener("drop", onDrop); window.removeEventListener("dragover", onDrag); };
       }, []);
 
-      // キーボードショートカット
+      // ---- キーボードショートカット（タブ関連は削除）----
       useEffect(() => {
         const isEditable = (el) => {
           if (!el) return false;
@@ -88,75 +95,48 @@
           return tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable;
         };
         const clampTol = (v) => Math.max(0, Math.min(128, v));
-
-        const switchGroupByOffset = (off) => {
-          const idx = GROUP_ORDER.indexOf(activeGroup);
-          const next = (idx + off + GROUP_ORDER.length) % GROUP_ORDER.length;
-          const g = GROUP_ORDER[next];
-          setActiveGroup(g);
-          const first = (PALETTE_GROUPS[g] || [])[0];
-          if (first) setColor(first);
-        };
-
-        const selectPaletteIndex = (n) => {
-          const list = PALETTE_GROUPS[activeGroup] || [];
-          if (n >= 1 && n <= list.length) setColor(list[n - 1]);
-        };
-
         const onKeyDown = (e) => {
           if (isEditable(document.activeElement)) return;
-
           const ctrl = e.ctrlKey || e.metaKey;
           const shift = e.shiftKey;
           const key = e.key;
 
-          // Undo / Redo
-          if (ctrl && key.toLowerCase() === "z" && !shift) {
-            e.preventDefault(); undo(); return;
-          }
-          if ((ctrl && key.toLowerCase() === "y") || (ctrl && key.toLowerCase() === "z" && shift)) {
-            e.preventDefault(); redo(); return;
-          }
+          if (ctrl && key.toLowerCase() === "z" && !shift) { e.preventDefault(); undo(); return; }
+          if ((ctrl && key.toLowerCase() === "y") || (ctrl && key.toLowerCase() === "z" && shift)) { e.preventDefault(); redo(); return; }
 
-          // ツール切替
           if (!ctrl && !shift && key.toLowerCase() === "f") { setMode("fill"); return; }
           if (!ctrl && !shift && key.toLowerCase() === "i") { setMode("eyedropper"); return; }
-          if (!ctrl && !shift && key.toLowerCase() === "b") { setMode(m => m === "fill" ? "eyedropper" : "fill"); return; }
+          if (!ctrl && !shift && key.toLowerCase() === "b") { setMode(m => m==="fill" ? "eyedropper" : "fill"); return; }
 
-          // 保存 / オープン / リセット
           if (!ctrl && !shift && key.toLowerCase() === "s") { e.preventDefault(); savePng(); return; }
           if (!ctrl && !shift && key.toLowerCase() === "o") { e.preventDefault(); handleOpen(); return; }
           if (!ctrl && !shift && key.toLowerCase() === "r") { e.preventDefault(); clearAll(); return; }
 
-          // 連結ON/OFF
           if (!ctrl && !shift && key.toLowerCase() === "g") { setContiguous(v => !v); return; }
 
-          // 許容差調整 ([ ], - , =)
           if (key === "[" || key === "-") { setTolerance(v => clampTol(v - 4)); return; }
           if (key === "]" || key === "=" || key === "+") { setTolerance(v => clampTol(v + 4)); return; }
-
-          // テーマ切替（左右矢印）
-          if (key === "ArrowLeft") { switchGroupByOffset(-1); return; }
-          if (key === "ArrowRight") { switchGroupByOffset(1); return; }
-
-          // 数字1〜9でパレット選択
-          if (/^[1-9]$/.test(key)) { selectPaletteIndex(parseInt(key, 10)); return; }
         };
-
         window.addEventListener("keydown", onKeyDown, { passive: false });
         return () => window.removeEventListener("keydown", onKeyDown);
-      }, [activeGroup, undoStack, redoStack]);
+      }, [undoStack, redoStack]);
 
+      // ---- 色が変わったら Cookie 更新・最近色に追加 ----
+      useEffect(() => {
+        setCookie("mapfill_color", color);
+        setRecentColors((prev) => {
+          const next = [color, ...prev.filter(c => c !== color)].slice(0, 12);
+          setCookie("mapfill_recent", JSON.stringify(next));
+          return next;
+        });
+      }, [color]);
+
+      // 画像読み込み系
       const loadFile = (file) => {
         const reader = new FileReader();
-        reader.onload = () => {
-          const image = new Image();
-          image.onload = () => afterImageLoaded(image);
-          image.src = reader.result;
-        };
+        reader.onload = () => { const image = new Image(); image.onload = () => afterImageLoaded(image); image.src = reader.result; };
         reader.readAsDataURL(file);
       };
-
       const autoLoadImage = (url) => new Promise((resolve, reject) => {
         if (!url) return reject();
         const image = new Image();
@@ -165,184 +145,98 @@
         image.onerror = reject;
         image.src = url;
       });
-
       const afterImageLoaded = (image) => {
-        setImg(image);
-        layoutToViewport(image);
-        drawImage(image);
-        setUndoStack([]);
-        setRedoStack([]);
+        setImg(image); layoutToViewport(image); drawImage(image);
+        setUndoStack([]); setRedoStack([]);
       };
-
       const drawImage = (image) => {
-        const canvas = canvasRef.current;
-        const ctx = canvas.getContext("2d");
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.imageSmoothingEnabled = true;
-        ctx.drawImage(image, 0, 0, image.width, image.height, 0, 0, canvas.width, canvas.height);
+        const c = canvasRef.current, ctx = c.getContext("2d");
+        ctx.clearRect(0,0,c.width,c.height); ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(image, 0,0, image.width,image.height, 0,0, c.width,c.height);
       };
-
       const layoutToViewport = (image) => {
         const maxW = Math.min(window.innerWidth - 360, 1400);
         const ratio = Math.min(1, maxW / image.width);
-        const w = Math.round(image.width * ratio);
-        const h = Math.round(image.height * ratio);
-
-        const canvas = canvasRef.current;
-        const overlay = overlayRef.current;
-
-        canvas.width = image.width;
-        canvas.height = image.height;
-        overlay.width = image.width;
-        overlay.height = image.height;
-
-        canvas.style.width = w + "px";
-        canvas.style.height = h + "px";
-        overlay.style.width = w + "px";
-        overlay.style.height = h + "px";
-
+        const w = Math.round(image.width * ratio), h = Math.round(image.height * ratio);
+        const c = canvasRef.current, o = overlayRef.current;
+        c.width = image.width; c.height = image.height; o.width = image.width; o.height = image.height;
+        c.style.width = w + "px"; c.style.height = h + "px";
+        o.style.width = w + "px"; o.style.height = h + "px";
         setCanvasSize({ w: image.width, h: image.height });
       };
-
       const getImageXY = (evt) => {
         const rect = evt.target.getBoundingClientRect();
         const x = Math.floor(((evt.clientX - rect.left) * (canvasSize.w / rect.width)));
         const y = Math.floor(((evt.clientY - rect.top) * (canvasSize.h / rect.height)));
         return { x, y };
       };
-
       const getPixel = (data, idx) => [data[idx], data[idx+1], data[idx+2], data[idx+3]];
-      const colorDist = (a, b) => {
-        const dr = a[0]-b[0], dg=a[1]-b[1], db=a[2]-b[2];
-        return Math.sqrt(dr*dr + dg*dg + db*db);
-      };
-      const hexToRgb = (hex) => {
-        const m = /^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hex);
-        return [parseInt(m[1],16), parseInt(m[2],16), parseInt(m[3],16)];
-      };
+      const colorDist = (a,b) => { const dr=a[0]-b[0], dg=a[1]-b[1], db=a[2]-b[2]; return Math.sqrt(dr*dr+dg*dg+db*db); };
+      const hexToRgb = (hex) => { const m=/^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hex); return [parseInt(m[1],16),parseInt(m[2],16),parseInt(m[3],16)]; };
 
       const pushUndo = () => {
-        const c = canvasRef.current;
-        const ctx = c.getContext("2d");
-        const snap = ctx.getImageData(0, 0, c.width, c.height);
-        setUndoStack(prev => {
-          const next = [...prev, snap];
-          if (next.length > 20) next.shift();
-          return next;
-        });
+        const c = canvasRef.current, ctx = c.getContext("2d");
+        const snap = ctx.getImageData(0,0,c.width,c.height);
+        setUndoStack(prev => { const next=[...prev, snap]; if(next.length>20) next.shift(); return next; });
         setRedoStack([]);
       };
-
       const undo = () => {
-        const c = canvasRef.current;
-        const ctx = c.getContext("2d");
-        setUndoStack(prev => {
-          if (!prev.length) return prev;
+        const c = canvasRef.current, ctx = c.getContext("2d");
+        setUndoStack(prev => { if(!prev.length) return prev;
           setRedoStack(r => [...r, ctx.getImageData(0,0,c.width,c.height)]);
-          const last = prev[prev.length-1];
-          ctx.putImageData(last, 0, 0);
-          return prev.slice(0,-1);
+          const last = prev[prev.length-1]; ctx.putImageData(last,0,0); return prev.slice(0,-1);
         });
       };
-
       const redo = () => {
-        const c = canvasRef.current;
-        const ctx = c.getContext("2d");
-        setRedoStack(prev => {
-          if (!prev.length) return prev;
+        const c = canvasRef.current, ctx = c.getContext("2d");
+        setRedoStack(prev => { if(!prev.length) return prev;
           setUndoStack(u => [...u, ctx.getImageData(0,0,c.width,c.height)]);
-          const last = prev[prev.length-1];
-          ctx.putImageData(last, 0, 0);
-          return prev.slice(0,-1);
+          const last = prev[prev.length-1]; ctx.putImageData(last,0,0); return prev.slice(0,-1);
         });
       };
 
-      const match = (pix, target, tol) => colorDist(pix, target) <= tol;
-
-      const floodFillContiguous = (data, w, h, sx, sy, target, fill, tol) => {
-        const visited = new Uint8Array(w*h);
-        const q = [[sx, sy]];
-        while (q.length) {
-          const [x, y] = q.pop();
-          if (x < 0 || y < 0 || x >= w || y >= h) continue;
-          const idx = (y*w + x)*4;
-          if (visited[y*w + x]) continue;
-          const pix = [data[idx], data[idx+1], data[idx+2]];
-          if (!match(pix, target, tol)) continue;
-          visited[y*w + x] = 1;
-          data[idx] = fill[0];
-          data[idx+1] = fill[1];
-          data[idx+2] = fill[2];
-          data[idx+3] = 255;
-          q.push([x+1,y], [x-1,y], [x,y+1], [x,y-1]);
+      const match = (pix,target,tol) => colorDist(pix,target) <= tol;
+      const floodFillContiguous = (data,w,h,sx,sy,target,fill,tol) => {
+        const visited = new Uint8Array(w*h), q=[[sx,sy]];
+        while(q.length){
+          const [x,y]=q.pop(); if(x<0||y<0||x>=w||y>=h) continue;
+          const idx=(y*w+x)*4; if(visited[y*w+x]) continue;
+          const pix=[data[idx],data[idx+1],data[idx+2]]; if(!match(pix,target,tol)) continue;
+          visited[y*w+x]=1; data[idx]=fill[0]; data[idx+1]=fill[1]; data[idx+2]=fill[2]; data[idx+3]=255;
+          q.push([x+1,y],[x-1,y],[x,y+1],[x,y-1]);
         }
       };
-
-      const floodFillGlobal = (data, w, h, target, fill, tol) => {
-        for (let y=0;y<h;y++){
-          for (let x=0;x<w;x++){
-            const idx = (y*w + x)*4;
-            const pix = [data[idx], data[idx+1], data[idx+2]];
-            if (match(pix, target, tol)) {
-              data[idx] = fill[0];
-              data[idx+1] = fill[1];
-              data[idx+2] = fill[2];
-              data[idx+3] = 255;
-            }
-          }
-        }
+      const floodFillGlobal = (data,w,h,target,fill,tol) => {
+        for(let y=0;y<h;y++){ for(let x=0;x<w;x++){ const idx=(y*w+x)*4;
+          const pix=[data[idx],data[idx+1],data[idx+2]]; if(match(pix,target,tol)){ data[idx]=fill[0]; data[idx+1]=fill[1]; data[idx+2]=fill[2]; data[idx+3]=255; }
+        }}
       };
 
       const handleCanvasClick = (e) => {
         if (!img) return;
         const { x, y } = getImageXY(e);
-        const c = canvasRef.current;
-        const ctx = c.getContext("2d", { willReadFrequently: true });
-        const imgData = ctx.getImageData(0, 0, c.width, c.height);
-        const data = imgData.data;
+        const c = canvasRef.current, ctx = c.getContext("2d", { willReadFrequently: true });
+        const imgData = ctx.getImageData(0,0,c.width,c.height), data = imgData.data;
         const idx0 = (y * c.width + x) * 4;
 
         if (mode === "eyedropper") {
           const [r,g,b] = getPixel(data, idx0);
-          setColor("#" + [r,g,b].map(v=>v.toString(16).padStart(2,"0")).join(""));
-          setMode("fill");
-          return;
+          setColor("#" + [r,g,b].map(v=>v.toString(16).padStart(2,"0")).join("")); setMode("fill"); return;
         }
         const target = [data[idx0], data[idx0+1], data[idx0+2]];
-        if (!target) return;
         const fillCol = hexToRgb(color);
         if (colorDist(target, fillCol) <= 1) return;
 
         pushUndo();
-        if (contiguous) {
-          floodFillContiguous(data, c.width, c.height, x, y, target, fillCol, tolerance);
-        } else {
-          floodFillGlobal(data, c.width, c.height, target, fillCol, tolerance);
-        }
+        if (contiguous) floodFillContiguous(data, c.width, c.height, x, y, target, fillCol, tolerance);
+        else floodFillGlobal(data, c.width, c.height, target, fillCol, tolerance);
         ctx.putImageData(imgData, 0, 0);
       };
 
       const handleOpen = () => fileInputRef.current?.click();
-      const handleFile = (e) => {
-        const f = e.target.files?.[0];
-        if (f) loadFile(f);
-      };
-
-      const savePng = () => {
-        const a = document.createElement("a");
-        a.download = "colored-map.png";
-        a.href = canvasRef.current.toDataURL("image/png");
-        a.click();
-      };
-
-      const clearAll = () => {
-        if (!img) return;
-        drawImage(img);
-        setUndoStack([]);
-        setRedoStack([]);
-      };
-
-      const currentPalette = PALETTE_GROUPS[activeGroup] ?? [];
+      const handleFile = (e) => { const f = e.target.files?.[0]; if (f) loadFile(f); };
+      const savePng = () => { const a=document.createElement("a"); a.download="colored-map.png"; a.href=canvasRef.current.toDataURL("image/png"); a.click(); };
+      const clearAll = () => { if(!img) return; drawImage(img); setUndoStack([]); setRedoStack([]); };
 
       return (
         <div className="min-h-screen w-full">
@@ -373,7 +267,7 @@
               </div>
             </div>
 
-            <aside className="rounded-2xl bg-white border shadow p-4 flex flex-col gap-4">
+            <aside className="rounded-2xl bg-white border shadow p-4 flex flex-col gap-5">
               <div>
                 <div className="text-sm font-semibold mb-1">ツール</div>
                 <div className="grid grid-cols-3 gap-2">
@@ -383,32 +277,36 @@
                 </div>
               </div>
 
-              {/* テーマタブ */}
               <div>
-                <div className="text-sm font-semibold mb-2">テーマ <span className="text-xs text-gray-400">(←/→)</span></div>
-                <div className="grid grid-cols-4 gap-2">
-                  {GROUP_ORDER.map((g)=>(
-                    <button key={g}
-                      className={"px-2 py-1.5 rounded-xl border text-sm " + (activeGroup===g ? "bg-gray-900 text-white" : "bg-white")}
-                      onClick={()=>{ setActiveGroup(g); const first=PALETTE_GROUPS[g][0]; if(first) setColor(first); }}>
-                      {g}
-                    </button>
-                  ))}
+                <div className="text-sm font-semibold mb-1">現在の色</div>
+                <input type="color" className="w-full h-10 rounded-lg border" value={color} onChange={(e)=>setColor(e.target.value)} />
+              </div>
+
+              <!-- 最近使った色（Cookie保存） -->
+              <div>
+                <div className="text-sm font-semibold mb-1">最近使った色（Cookie保存）</div>
+                <div className="grid grid-cols-6 gap-2">
+                  {recentColors.length === 0 ? (
+                    <div className="text-xs text-gray-500 col-span-6">まだありません。色を選んで塗るとここに貯まります。</div>
+                  ) : (
+                    recentColors.map((p,idx)=>(
+                      <button key={p+idx} onClick={()=>setColor(p)} className="h-9 rounded-lg border" style={{background:p}} aria-label={p} title={p}></button>
+                    ))
+                  )}
                 </div>
               </div>
 
-              {/* カラーパレット */}
-              <div>
-                <div className="text-sm font-semibold mb-1">色（{activeGroup}） <span className="text-xs text-gray-400">1–9で選択</span></div>
-                <input type="color" className="w-full h-10 rounded-lg border mb-2" value={color} onChange={(e)=>setColor(e.target.value)} />
-                <div className="grid grid-cols-6 gap-2">
-                  {(PALETTE_GROUPS[activeGroup]||[]).map((p,idx)=>(
-                    <button key={p} onClick={()=>setColor(p)} className="h-9 rounded-lg border flex items-center justify-center" style={{background:p}} aria-label={p} title={(idx+1).toString()}>
-                      <span className="text-[10px] bg-white bg-opacity-70 rounded px-1">{idx+1}</span>
-                    </button>
-                  ))}
+              <!-- 固定パレット（タブなしで全部表示） -->
+              {Object.entries(PALETTE_GROUPS).map(([label, list]) => (
+                <div key={label}>
+                  <div className="text-sm font-semibold mb-1">{label}</div>
+                  <div className="grid grid-cols-6 gap-2">
+                    {list.map((p)=>(
+                      <button key={p} onClick={()=>setColor(p)} className="h-9 rounded-lg border" style={{background:p}} aria-label={p} title={p}></button>
+                    ))}
+                  </div>
                 </div>
-              </div>
+              ))}
 
               <div>
                 <div className="text-sm font-semibold mb-1">許容差（輪郭のにじみ対策） <span className="text-xs text-gray-400">[ / ] または - / =</span></div>
@@ -436,8 +334,6 @@
                   <div><kbd>R</kbd> リセット</div>
                   <div><kbd>G</kbd> 連結 ON/OFF</div>
                   <div><kbd>[</kbd>/<kbd>]</kbd> 許容差 ±4</div>
-                  <div><kbd>←</kbd>/<kbd>→</kbd> テーマ切替</div>
-                  <div><kbd>1–9</kbd> パレット選択</div>
                 </div>
               </div>
 
@@ -446,7 +342,7 @@
           </main>
 
           <footer className="py-6 text-center text-xs text-gray-500">
-            画像は端末内でのみ処理されます（PNG保存対応）。
+            画像は端末内でのみ処理されます（PNG保存対応）。色設定はCookieで一時保存します。
           </footer>
         </div>
       );
