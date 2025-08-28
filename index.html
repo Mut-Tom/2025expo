@@ -11,6 +11,11 @@
   <style>
     html,body { height: 100%; }
     .touch-none { touch-action: none; }
+    kbd {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      background: #f5f5f5; border: 1px solid #ddd; border-bottom-width: 2px; padding: 2px 6px; border-radius: 6px;
+      font-size: 12px;
+    }
   </style>
 </head>
 <body class="bg-gray-50 text-gray-900">
@@ -74,6 +79,73 @@
           window.removeEventListener("dragover", onDrag);
         };
       }, []);
+
+      // キーボードショートカット
+      useEffect(() => {
+        const isEditable = (el) => {
+          if (!el) return false;
+          const tag = el.tagName?.toLowerCase();
+          return tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable;
+        };
+        const clampTol = (v) => Math.max(0, Math.min(128, v));
+
+        const switchGroupByOffset = (off) => {
+          const idx = GROUP_ORDER.indexOf(activeGroup);
+          const next = (idx + off + GROUP_ORDER.length) % GROUP_ORDER.length;
+          const g = GROUP_ORDER[next];
+          setActiveGroup(g);
+          const first = (PALETTE_GROUPS[g] || [])[0];
+          if (first) setColor(first);
+        };
+
+        const selectPaletteIndex = (n) => {
+          const list = PALETTE_GROUPS[activeGroup] || [];
+          if (n >= 1 && n <= list.length) setColor(list[n - 1]);
+        };
+
+        const onKeyDown = (e) => {
+          if (isEditable(document.activeElement)) return;
+
+          const ctrl = e.ctrlKey || e.metaKey;
+          const shift = e.shiftKey;
+          const key = e.key;
+
+          // Undo / Redo
+          if (ctrl && key.toLowerCase() === "z" && !shift) {
+            e.preventDefault(); undo(); return;
+          }
+          if ((ctrl && key.toLowerCase() === "y") || (ctrl && key.toLowerCase() === "z" && shift)) {
+            e.preventDefault(); redo(); return;
+          }
+
+          // ツール切替
+          if (!ctrl && !shift && key.toLowerCase() === "f") { setMode("fill"); return; }
+          if (!ctrl && !shift && key.toLowerCase() === "i") { setMode("eyedropper"); return; }
+          if (!ctrl && !shift && key.toLowerCase() === "b") { setMode(m => m === "fill" ? "eyedropper" : "fill"); return; }
+
+          // 保存 / オープン / リセット
+          if (!ctrl && !shift && key.toLowerCase() === "s") { e.preventDefault(); savePng(); return; }
+          if (!ctrl && !shift && key.toLowerCase() === "o") { e.preventDefault(); handleOpen(); return; }
+          if (!ctrl && !shift && key.toLowerCase() === "r") { e.preventDefault(); clearAll(); return; }
+
+          // 連結ON/OFF
+          if (!ctrl && !shift && key.toLowerCase() === "g") { setContiguous(v => !v); return; }
+
+          // 許容差調整 ([ ], - , =)
+          if (key === "[" || key === "-") { setTolerance(v => clampTol(v - 4)); return; }
+          if (key === "]" || key === "=" || key === "+") { setTolerance(v => clampTol(v + 4)); return; }
+
+          // テーマ切替（左右矢印）
+          if (key === "ArrowLeft") { switchGroupByOffset(-1); return; }
+          if (key === "ArrowRight") { switchGroupByOffset(1); return; }
+
+          // 数字1〜9でパレット選択
+          if (/^[1-9]$/.test(key)) { selectPaletteIndex(parseInt(key, 10)); return; }
+        };
+
+        window.addEventListener("keydown", onKeyDown, { passive: false });
+        return () => window.removeEventListener("keydown", onKeyDown);
+      }, [activeGroup, undoStack, redoStack]);
 
       const loadFile = (file) => {
         const reader = new FileReader();
@@ -237,6 +309,7 @@
           return;
         }
         const target = [data[idx0], data[idx0+1], data[idx0+2]];
+        if (!target) return;
         const fillCol = hexToRgb(color);
         if (colorDist(target, fillCol) <= 1) return;
 
@@ -277,16 +350,16 @@
             <div className="mx-auto max-w-screen-2xl px-6 py-3 flex items-center gap-3">
               <div className="text-xl font-bold">クリックで塗りつぶせるマップ</div>
               <div className="ml-auto flex gap-2">
-                <button onClick={handleOpen} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">画像を開く</button>
-                <button onClick={savePng} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">PNG保存</button>
-                <button onClick={undo} disabled={!undoStack.length} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">Undo</button>
-                <button onClick={redo} disabled={!redoStack.length} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">Redo</button>
-                <button onClick={clearAll} disabled={!img} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">リセット</button>
+                <button onClick={handleOpen} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">画像を開く <span className="text-xs text-gray-500 ml-1">(O)</span></button>
+                <button onClick={savePng} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">PNG保存 <span className="text-xs text-gray-500 ml-1">(S)</span></button>
+                <button onClick={undo} disabled={!undoStack.length} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">Undo <span className="text-xs text-gray-500 ml-1">(⌘/Ctrl+Z)</span></button>
+                <button onClick={redo} disabled={!redoStack.length} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">Redo <span className="text-xs text-gray-500 ml-1">(⌘/Ctrl+Shift+Z / Y)</span></button>
+                <button onClick={clearAll} disabled={!img} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border">リセット <span className="text-xs text-gray-500 ml-1">(R)</span></button>
               </div>
             </div>
           </header>
 
-          <main className="mx-auto max-w-screen-2xl p-6 grid grid-cols-1 lg:grid-cols-[_1fr_340px] gap-6">
+          <main className="mx-auto max-w-screen-2xl p-6 grid grid-cols-1 lg:grid-cols-[_1fr_360px] gap-6">
             <div className="relative rounded-2xl bg-white border shadow overflow-auto p-4 flex justify-center">
               <div className="relative">
                 <canvas ref={canvasRef} className="rounded-xl shadow border select-none touch-none" onClick={handleCanvasClick} />
@@ -303,20 +376,21 @@
             <aside className="rounded-2xl bg-white border shadow p-4 flex flex-col gap-4">
               <div>
                 <div className="text-sm font-semibold mb-1">ツール</div>
-                <div className="grid grid-cols-2 gap-2">
-                  <button className={"px-3 py-2 rounded-xl border " + (mode==="fill" ? "bg-gray-900 text-white" : "bg-white")} onClick={()=>setMode("fill")}>塗りつぶし</button>
-                  <button className={"px-3 py-2 rounded-xl border " + (mode==="eyedropper" ? "bg-gray-900 text-white" : "bg-white")} onClick={()=>setMode("eyedropper")}>スポイト</button>
+                <div className="grid grid-cols-3 gap-2">
+                  <button className={"px-3 py-2 rounded-xl border " + (mode==="fill" ? "bg-gray-900 text-white" : "bg-white")} onClick={()=>setMode("fill")}>塗りつぶし <span className="text-xs text-gray-300">(F)</span></button>
+                  <button className={"px-3 py-2 rounded-xl border " + (mode==="eyedropper" ? "bg-gray-900 text-white" : "bg-white")} onClick={()=>setMode("eyedropper")}>スポイト <span className="text-xs text-gray-300">(I)</span></button>
+                  <button className="px-3 py-2 rounded-xl border bg-white" onClick={()=>setMode(m=>m==="fill"?"eyedropper":"fill")}>切替 <span className="text-xs text-gray-300">(B)</span></button>
                 </div>
               </div>
 
               {/* テーマタブ */}
               <div>
-                <div className="text-sm font-semibold mb-2">テーマ</div>
+                <div className="text-sm font-semibold mb-2">テーマ <span className="text-xs text-gray-400">(←/→)</span></div>
                 <div className="grid grid-cols-4 gap-2">
                   {GROUP_ORDER.map((g)=>(
                     <button key={g}
                       className={"px-2 py-1.5 rounded-xl border text-sm " + (activeGroup===g ? "bg-gray-900 text-white" : "bg-white")}
-                      onClick={()=>{ setActiveGroup(g); /* 切替時に最初の色を選択 */ const first=PALETTE_GROUPS[g][0]; if(first) setColor(first); }}>
+                      onClick={()=>{ setActiveGroup(g); const first=PALETTE_GROUPS[g][0]; if(first) setColor(first); }}>
                       {g}
                     </button>
                   ))}
@@ -325,17 +399,19 @@
 
               {/* カラーパレット */}
               <div>
-                <div className="text-sm font-semibold mb-1">色（{activeGroup}）</div>
+                <div className="text-sm font-semibold mb-1">色（{activeGroup}） <span className="text-xs text-gray-400">1–9で選択</span></div>
                 <input type="color" className="w-full h-10 rounded-lg border mb-2" value={color} onChange={(e)=>setColor(e.target.value)} />
                 <div className="grid grid-cols-6 gap-2">
-                  {currentPalette.map((p)=>(
-                    <button key={p} onClick={()=>setColor(p)} className="h-9 rounded-lg border" style={{background:p}} aria-label={p} />
+                  {(PALETTE_GROUPS[activeGroup]||[]).map((p,idx)=>(
+                    <button key={p} onClick={()=>setColor(p)} className="h-9 rounded-lg border flex items-center justify-center" style={{background:p}} aria-label={p} title={(idx+1).toString()}>
+                      <span className="text-[10px] bg-white bg-opacity-70 rounded px-1">{idx+1}</span>
+                    </button>
                   ))}
                 </div>
               </div>
 
               <div>
-                <div className="text-sm font-semibold mb-1">許容差（輪郭のにじみ対策）</div>
+                <div className="text-sm font-semibold mb-1">許容差（輪郭のにじみ対策） <span className="text-xs text-gray-400">[ / ] または - / =</span></div>
                 <input type="range" min="0" max="128" value={tolerance} onChange={(e)=>setTolerance(parseInt(e.target.value))} className="w-full" />
                 <div className="text-xs text-gray-600">現在: {tolerance}</div>
               </div>
@@ -343,17 +419,26 @@
               <div className="flex items-center justify-between">
                 <label className="flex items-center gap-2 text-sm">
                   <input type="checkbox" checked={contiguous} onChange={(e)=>setContiguous(e.target.checked)} />
-                  連結のみを塗る（ON 推奨）
+                  連結のみを塗る（ON 推奨） <span className="text-xs text-gray-400 ml-1">(G)</span>
                 </label>
               </div>
 
               <div className="border-t pt-3 text-xs text-gray-600 leading-relaxed">
-                <p>コツ:</p>
-                <ul className="list-disc ml-4 mt-1 space-y-1">
-                  <li>漏れる時は「許容差」を下げる / 連結ON。</li>
-                  <li>境界色をスポイト→別色に置換→塗り、で精度UP。</li>
-                  <li>Undo/Redo は 20 段階。</li>
-                </ul>
+                <p className="font-semibold mb-1">ショートカット</p>
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                  <div><kbd>⌘/Ctrl</kbd> + <kbd>Z</kbd> Undo</div>
+                  <div><kbd>⌘/Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Z</kbd> / <kbd>Y</kbd> Redo</div>
+                  <div><kbd>F</kbd> 塗りつぶし</div>
+                  <div><kbd>I</kbd> スポイト</div>
+                  <div><kbd>B</kbd> ツール切替</div>
+                  <div><kbd>S</kbd> 保存</div>
+                  <div><kbd>O</kbd> 画像を開く</div>
+                  <div><kbd>R</kbd> リセット</div>
+                  <div><kbd>G</kbd> 連結 ON/OFF</div>
+                  <div><kbd>[</kbd>/<kbd>]</kbd> 許容差 ±4</div>
+                  <div><kbd>←</kbd>/<kbd>→</kbd> テーマ切替</div>
+                  <div><kbd>1–9</kbd> パレット選択</div>
+                </div>
               </div>
 
               <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFile} />
