@@ -20,6 +20,7 @@
   <script type="text/babel">
     const { useEffect, useRef, useState } = React;
 
+    // 自動読み込み画像
     const DEFAULT_IMAGE = "map.png";
     const getImgFromQuery = () => {
       const p = new URLSearchParams(location.search);
@@ -27,6 +28,7 @@
       return v && v.trim() ? v.trim() : null;
     };
 
+    // 固定パレット（タブなしで全部表示）
     const PALETTE_GROUPS = {
       Inochi: ["#e60012", "#0068b7", "#ffffff"],
       Umi:    ["#9b89c6", "#0095b6", "#82cddd", "#8fc31f"],
@@ -34,6 +36,7 @@
       Hikari: ["#f39800", "#e60012", "#ffd900"],
     };
 
+    // Cookie util
     const setCookie = (name, value, days=180) => {
       const d = new Date(); d.setTime(d.getTime() + days*24*60*60*1000);
       document.cookie = `${name}=${encodeURIComponent(value)}; expires=${d.toUTCString()}; path=/; SameSite=Lax`;
@@ -41,7 +44,7 @@
     const getCookie = (name) => {
       const key = name + "=";
       const arr = document.cookie.split(";").map(s=>s.trim());
-      for (const c of arr) { if (c.indexOf(key) === 0) return decodeURIComponent(c.substring(key.length)); }
+      for (const c of arr) if (c.indexOf(key) === 0) return decodeURIComponent(c.substring(key.length));
       return null;
     };
 
@@ -52,25 +55,26 @@
 
       const [img, setImg] = useState(null);
 
+      // 色（Cookie復元）
       const cookieColor = getCookie("mapfill_color") || "#e60012";
-      const cookieRecent = (() => {
-        try { return JSON.parse(getCookie("mapfill_recent") || "[]"); } catch { return []; }
-      })();
+      const cookieRecent = (() => { try { return JSON.parse(getCookie("mapfill_recent") || "[]"); } catch { return []; } })();
 
       const [color, setColor] = useState(cookieColor);
-      const [recentColors, setRecentColors] = useState(cookieRecent);
+      const [recentColors, setRecentColors] = useState(cookieRecent); // 先頭が最新
       const [tolerance, setTolerance] = useState(28);
       const [contiguous, setContiguous] = useState(true);
-      const [mode, setMode] = useState("fill");
+      const [mode, setMode] = useState("fill"); // UI非表示。F/I/Bで切替
       const [undoStack, setUndoStack] = useState([]);
       const [redoStack, setRedoStack] = useState([]);
       const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
 
+      // 初期画像ロード
       useEffect(() => {
         const first = getImgFromQuery() || DEFAULT_IMAGE;
         autoLoadImage(first).catch(() => console.warn("自動読み込み用の画像が見つかりません:", first));
       }, []);
 
+      // D&D 取り込み
       useEffect(() => {
         const onDrop = (e) => { e.preventDefault(); const f = e.dataTransfer?.files?.[0]; if (f) loadFile(f); };
         const onDrag = (e) => e.preventDefault();
@@ -79,6 +83,7 @@
         return () => { window.removeEventListener("drop", onDrop); window.removeEventListener("dragover", onDrag); };
       }, []);
 
+      // ショートカット（ツールUIなし）
       useEffect(() => {
         const isEditable = (el) => {
           if (!el) return false;
@@ -92,19 +97,24 @@
           const shift = e.shiftKey;
           const key = e.key;
 
+          // Undo/Redo
           if (ctrl && key.toLowerCase() === "z" && !shift) { e.preventDefault(); undo(); return; }
           if ((ctrl && key.toLowerCase() === "y") || (ctrl && key.toLowerCase() === "z" && shift)) { e.preventDefault(); redo(); return; }
 
+          // ツール切替（UIなし）
           if (!ctrl && !shift && key.toLowerCase() === "f") { setMode("fill"); return; }
           if (!ctrl && !shift && key.toLowerCase() === "i") { setMode("eyedropper"); return; }
           if (!ctrl && !shift && key.toLowerCase() === "b") { setMode(m => m==="fill" ? "eyedropper" : "fill"); return; }
 
+          // ファイル/保存/リセット
           if (!ctrl && !shift && key.toLowerCase() === "s") { e.preventDefault(); savePng(); return; }
           if (!ctrl && !shift && key.toLowerCase() === "o") { e.preventDefault(); handleOpen(); return; }
           if (!ctrl && !shift && key.toLowerCase() === "r") { e.preventDefault(); clearAll(); return; }
 
+          // 連結ON/OFF
           if (!ctrl && !shift && key.toLowerCase() === "g") { setContiguous(v => !v); return; }
 
+          // 許容差
           if (key === "[" || key === "-") { setTolerance(v => clampTol(v - 4)); return; }
           if (key === "]" || key === "=" || key === "+") { setTolerance(v => clampTol(v + 4)); return; }
         };
@@ -112,6 +122,7 @@
         return () => window.removeEventListener("keydown", onKeyDown);
       }, [undoStack, redoStack]);
 
+      // 色変更 → Cookie & 最近色
       useEffect(() => {
         setCookie("mapfill_color", color);
         setRecentColors((prev) => {
@@ -121,6 +132,7 @@
         });
       }, [color]);
 
+      // 画像入出力
       const loadFile = (file) => {
         const reader = new FileReader();
         reader.onload = () => { const image = new Image(); image.onload = () => afterImageLoaded(image); image.src = reader.result; };
@@ -163,6 +175,7 @@
       const colorDist = (a,b) => { const dr=a[0]-b[0], dg=a[1]-b[1], db=a[2]-b[2]; return Math.sqrt(dr*dr+dg*dg+db*db); };
       const hexToRgb = (hex) => { const m=/^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hex); return [parseInt(m[1],16),parseInt(m[2],16),parseInt(m[3],16)]; };
 
+      // Undo/Redo
       const pushUndo = () => {
         const c = canvasRef.current, ctx = c.getContext("2d");
         const snap = ctx.getImageData(0,0,c.width,c.height);
@@ -184,6 +197,7 @@
         });
       };
 
+      // 塗りつぶし
       const match = (pix,target,tol) => colorDist(pix,target) <= tol;
       const floodFillContiguous = (data,w,h,sx,sy,target,fill,tol) => {
         const visited = new Uint8Array(w*h), q=[[sx,sy]];
@@ -210,7 +224,9 @@
 
         if (mode === "eyedropper") {
           const [r,g,b] = getPixel(data, idx0);
-          setColor("#" + [r,g,b].map(v=>v.toString(16).padStart(2,"0")).join("")); setMode("fill"); return;
+          setColor("#" + [r,g,b].map(v=>v.toString(16).padStart(2,"0")).join(""));
+          setMode("fill");
+          return;
         }
         const target = [data[idx0], data[idx0+1], data[idx0+2]];
         const fillCol = hexToRgb(color);
@@ -222,6 +238,7 @@
         ctx.putImageData(imgData, 0, 0);
       };
 
+      // ファイル操作
       const handleOpen = () => fileInputRef.current?.click();
       const handleFile = (e) => { const f = e.target.files?.[0]; if (f) loadFile(f); };
       const savePng = () => { const a=document.createElement("a"); a.download="colored-map.png"; a.href=canvasRef.current.toDataURL("image/png"); a.click(); };
@@ -256,6 +273,7 @@
               </div>
             </div>
 
+            <aside className="rounded-2xl bg-white border shadow p-4 flex flex-col gap-5">
               <div>
                 <div className="text-sm font-semibold mb-1">現在の色</div>
                 <input type="color" className="w-full h-10 rounded-lg border" value={color} onChange={(e)=>setColor(e.target.value)} />
@@ -275,7 +293,7 @@
                 </div>
               </div>
 
-              {/* 固定パレット（タブなしで全部表示） */}
+              {/* 固定パレット（全部表示） */}
               {Object.entries(PALETTE_GROUPS).map(([label, list]) => (
                 <div key={label}>
                   <div className="text-sm font-semibold mb-1">{label}</div>
