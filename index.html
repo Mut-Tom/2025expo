@@ -18,6 +18,7 @@
       .icon-label{ display:inline; }
       .icon-only{ display:none; }
     }
+    .zoom-input{ width:72px; text-align:right; }
   </style>
 </head>
 <body class="bg-gray-50 text-gray-900">
@@ -61,6 +62,7 @@
       const [img, setImg] = useState(null);
       const [imageKey, setImageKey] = useState(null);
       const [zoom, setZoom] = useState(1);
+      const [zoomInput, setZoomInput] = useState("100"); // ← 入力欄表示用
 
       const [color, setColor] = useState(LS.get(LS_COLOR, "#e60012"));
       const [recentColors, setRecentColors] = useState(LS.get(LS_RECENT, []));
@@ -78,6 +80,36 @@
       // ピンチ（2本指）
       const pointersRef = useRef(new Map()); // id -> {x,y}
       const pinchRef = useRef(null); // {startDist, startZoom, startCssW, startCssH, startScrollL, startScrollT, midClient:{x,y}}
+
+      // clamp & 共通ズーム適用（中心を維持するスクロール補正付き）
+      const clampZoom = (z) => Math.min(3, Math.max(0.5, +z.toFixed(3)));
+      const updateZoom = (nextZoom, anchorClient=null) => {
+        const nz = clampZoom(nextZoom);
+        const vp = viewportRef.current;
+        const cnv = canvasRef.current;
+        if (!vp || !cnv) { setZoom(nz); return; }
+
+        const vpRect = vp.getBoundingClientRect();
+        const cx = anchorClient ? (anchorClient.x - vpRect.left) : vpRect.width/2;
+        const cy = anchorClient ? (anchorClient.y - vpRect.top)  : vpRect.height/2;
+
+        // 変更前の状態
+        const oldRect = cnv.getBoundingClientRect();
+        const oldW = oldRect.width, oldH = oldRect.height;
+        const contentX = vp.scrollLeft + cx;
+        const contentY = vp.scrollTop  + cy;
+
+        setZoom(nz);
+        applyCanvasCssSize(img);
+
+        // 変更後の状態
+        const newRect = cnv.getBoundingClientRect();
+        const scaleX = newRect.width / (oldW || 1);
+        const scaleY = newRect.height / (oldH || 1);
+
+        vp.scrollLeft = contentX * scaleX - cx;
+        vp.scrollTop  = contentY * scaleY - cy;
+      };
 
       // 初期画像ロード
       useEffect(() => {
@@ -137,6 +169,11 @@
           return next;
         });
       }, [color]);
+
+      // zoom → 入力欄へ反映
+      useEffect(() => {
+        setZoomInput(String(Math.round(zoom * 100)));
+      }, [zoom]);
 
       // レイアウト（CSS拡大のみ）
       const getMaxCanvasCssWidth = () => {
@@ -353,7 +390,6 @@
         pointersRef.current.set(e.pointerId, {x:e.clientX, y:e.clientY});
 
         if (pointersRef.current.size === 2) {
-          // 2本目でピンチ開始
           e.currentTarget.setPointerCapture(e.pointerId);
           for (const id of pointersRef.current.keys()) {
             try { e.currentTarget.setPointerCapture(id); } catch {}
@@ -375,7 +411,6 @@
           };
           setIsPanning(false);
         } else if (pointersRef.current.size === 1 && canPan()) {
-          // パン開始（この pointer を追う）
           const vp = viewportRef.current;
           panStateRef.current = {
             startX: e.clientX,
@@ -395,7 +430,6 @@
           pointersRef.current.set(e.pointerId, {x:e.clientX, y:e.clientY});
         }
 
-        // ピンチ中
         if (pointersRef.current.size === 2 && pinchRef.current) {
           e.preventDefault();
           const vp = viewportRef.current;
@@ -403,11 +437,12 @@
           const dx = pts[0].x - pts[1].x, dy = pts[0].y - pts[1].y;
           const dist = Math.hypot(dx, dy);
           let scale = pinchRef.current.startZoom * (dist / pinchRef.current.startDist);
-          scale = Math.min(3, Math.max(0.5, Number(scale.toFixed(3))));
+          scale = clampZoom(scale);
+
+          // ピンチは従来の補正ロジック（高速のため）
           setZoom(scale);
           applyCanvasCssSize(img);
 
-          // ピンチ中心を維持
           const vpRect = vp.getBoundingClientRect();
           const cx = pinchRef.current.midClient.x - vpRect.left;
           const cy = pinchRef.current.midClient.y - vpRect.top;
@@ -430,7 +465,6 @@
           return;
         }
 
-        // パン中（開始時に決めた pointer の座標を使う）
         if (isPanning) {
           e.preventDefault();
           const vp = viewportRef.current;
@@ -456,40 +490,10 @@
 
       // ===== PC向け：Ctrl/⌘ + ホイールでズーム =====
       const onWheel = (e) => {
-        // トラックパッドのピンチは ctrlKey=true の wheel になるブラウザが多い
-        if (!e.ctrlKey && !e.metaKey) return; // 通常スクロールは素通し
+        if (!e.ctrlKey && !e.metaKey) return;
         e.preventDefault();
-
-        // 目標倍率（指数スケールで滑らかに）
         const factor = Math.exp(-e.deltaY * 0.0015);
-        const nextZoom = Math.min(3, Math.max(0.5, zoom * factor));
-
-        // マウス位置を中心に維持（viewport基準）
-        const vp = viewportRef.current;
-        const rect = vp.getBoundingClientRect();
-        const cx = e.clientX - rect.left;
-        const cy = e.clientY - rect.top;
-
-        // 適用前の状態を保存
-        const oldRect = canvasRef.current.getBoundingClientRect();
-        const oldW = oldRect.width;
-        const oldH = oldRect.height;
-        const contentX = vp.scrollLeft + cx;
-        const contentY = vp.scrollTop  + cy;
-
-        setZoom(nextZoom);
-        // CSS反映
-        applyCanvasCssSize(img);
-
-        const newRect = canvasRef.current.getBoundingClientRect();
-        const newW = newRect.width;
-        const newH = newRect.height;
-
-        const scaleRatioX = newW / oldW;
-        const scaleRatioY = newH / oldH;
-
-        vp.scrollLeft = contentX * scaleRatioX - cx;
-        vp.scrollTop  = contentY * scaleRatioY - cy;
+        updateZoom(zoom * factor, { x: e.clientX, y: e.clientY });
       };
 
       // Undo/Redo
@@ -560,6 +564,21 @@
         reader.readAsText(file);
       };
 
+      // ====== 拡大率入力欄のハンドラ ======
+      const applyZoomInput = () => {
+        let val = parseInt(zoomInput.replace(/[^\d]/g, ''), 10);
+        if (isNaN(val)) { setZoomInput(String(Math.round(zoom*100))); return; }
+        val = Math.max(50, Math.min(300, val));
+        setZoomInput(String(val));
+        updateZoom(val / 100); // 画面中心を基準に適用
+      };
+      const onZoomInputKey = (e) => {
+        if (e.key === "Enter") { applyZoomInput(); }
+        else if (e.key === "Escape") { setZoomInput(String(Math.round(zoom*100))); e.currentTarget.blur(); }
+        else if (e.key === "ArrowUp") { e.preventDefault(); const v = Math.min(300, (parseInt(zoomInput||"0",10)||0) + 10); setZoomInput(String(v)); }
+        else if (e.key === "ArrowDown") { e.preventDefault(); const v = Math.max(50, (parseInt(zoomInput||"0",10)||0) - 10); setZoomInput(String(v)); }
+      };
+
       return (
         <div className="min-h-screen w-full">
           <header className="sticky top-0 z-20 border-b bg-white/90 backdrop-blur">
@@ -596,7 +615,7 @@
                 onPointerUp={endPan}
                 onPointerCancel={endPan}
                 onPointerLeave={endPan}
-                onWheel={onWheel}  /* ← PCのピンチ（Ctrl+Wheel）ズーム対応 */
+                onWheel={onWheel}
               >
                 <div className="relative inline-block">
                   <canvas
@@ -607,26 +626,29 @@
                   <canvas ref={overlayRef} className="absolute inset-0 pointer-events-none rounded-xl" />
                 </div>
 
-                {/* 固定HUD */}
+                {/* 固定HUD（ズーム入力付き） */}
                 <div className="sticky bottom-2 left-0 right-0 flex justify-center pointer-events-none">
                   <div className="pointer-events-auto inline-flex items-center gap-2 px-3 py-1.5 rounded-full border bg-white/90 shadow text-sm">
-                    <span>Zoom: {(zoom*100).toFixed(0)}%</span>
-                    <button className="px-2 py-0.5 border rounded" onClick={() => { setZoom(1); setTimeout(()=>{ applyCanvasCssSize(img); centerViewport(); },0); }}>100%</button>
-                    <button className="px-2 py-0.5 border rounded" onClick={() => {
-                      setZoom(z => {
-                        const nz = Math.max(0.5, +(Math.round((z-0.1)*10)/10).toFixed(2));
-                        setTimeout(()=>{ applyCanvasCssSize(img); centerViewport(); },0);
-                        return nz;
-                      });
-                    }}>−</button>
-                    <button className="px-2 py-0.5 border rounded" onClick={() => {
-                      setZoom(z => {
-                        const nz = Math.min(3, +(Math.round((z+0.1)*10)/10).toFixed(2));
-                        setTimeout(()=>{ applyCanvasCssSize(img); centerViewport(); },0);
-                        return nz;
-                      });
-                    }}>＋</button>
-                    <button className="px-2 py-0.5 border rounded" onClick={() => { setZoom(1); setTimeout(()=>{ applyCanvasCssSize(img); centerViewport(); },0); }}>Fit</button>
+                    <button className="px-2 py-0.5 border rounded" onClick={() => updateZoom(1)}>100%</button>
+                    <button className="px-2 py-0.5 border rounded" onClick={() => updateZoom(Math.max(0.5, +(Math.round((zoom-0.1)*10)/10).toFixed(2)))}>−</button>
+
+                    <div className="flex items-center gap-1">
+                      <span className="text-gray-600">Zoom</span>
+                      <input
+                        className="zoom-input px-2 py-0.5 border rounded"
+                        value={zoomInput}
+                        onChange={(e)=> setZoomInput(e.target.value.replace(/[^\d]/g,''))}
+                        onKeyDown={onZoomInputKey}
+                        onBlur={applyZoomInput}
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        aria-label="拡大率をパーセントで入力"
+                      />
+                      <span>%</span>
+                    </div>
+
+                    <button className="px-2 py-0.5 border rounded" onClick={() => updateZoom(Math.min(3, +(Math.round((zoom+0.1)*10)/10).toFixed(2)))}>＋</button>
+                    <button className="px-2 py-0.5 border rounded" onClick={() => updateZoom(1)}>Fit</button>
                   </div>
                 </div>
               </div>
@@ -688,11 +710,11 @@
             </aside>
           </main>
 
-          {/* 使い方は前と同じなので省略していません（必要なら追記します） */}
           <section className="mx-auto max-w-screen-2xl px-4 pb-4">
             <div className="rounded-2xl bg-white border shadow p-4">
               <h2 className="font-semibold mb-2">使い方</h2>
               <ul className="list-disc ml-5 space-y-1 text-sm">
+                <li><b>ズーム入力</b>：HUD の欄に <b>50〜300</b> を入力して <b>Enter</b> またはフォーカス外れで適用。<b>Esc</b> で取り消し、<b>↑/↓</b>で±10%。</li>
                 <li><b>画像の読み込み</b>：<code>map.png</code> を同階層に置くと自動表示。別画像は右上の <b>📂 画像を開く</b> から。</li>
                 <li><b>塗りつぶし</b>：画像をタップ/クリック。<b>許容差</b>スライダーで境界のにじみに対応。<b>連結のみ</b>で隣接領域だけ塗る。</li>
                 <li><b>スポイト</b>：<kbd>I</kbd> キーで切替 → 画像上をクリックして色取得（自動で塗りモードへ）。</li>
