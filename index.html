@@ -144,7 +144,7 @@
         });
       }, [color]);
 
-      // レイアウト（スマホ最適化：CSS幅のみ縮放）
+      // レイアウト（スマホ最適化：CSS幅のみ縮小/拡大）
       const getMaxCanvasCssWidth = () => {
         const outerPadding = 24 * 2; // p-6
         const cardPadding  = 16 * 2; // p-4
@@ -177,6 +177,14 @@
         canvas.style.height = cssH + "px";
         overlay.style.width  = cssW + "px";
         overlay.style.height = cssH + "px";
+      };
+
+      // ★ 中央寄せスクロール
+      const centerViewport = () => {
+        const vp = viewportRef.current;
+        if (!vp) return;
+        vp.scrollLeft = Math.max(0, (vp.scrollWidth  - vp.clientWidth)  / 2);
+        vp.scrollTop  = Math.max(0, (vp.scrollHeight - vp.clientHeight) / 2);
       };
 
       // 画像入出力
@@ -217,21 +225,13 @@
         const key = LS_ACTIONS_NS + hashStr(keySeed);
         setImageKey(key);
 
-        // CSSサイズ適用（スマホ対応）
+        // 表示サイズ適用＋中央寄せ
         applyCanvasCssSize(image);
+        centerViewport();
 
         // 履歴再生
         const saved = LS.get(key, []);
         if (saved?.length) replayActions(saved);
-
-        // 中央にスクロール
-        requestAnimationFrame(() => {
-          const vp = viewportRef.current;
-          if (vp) {
-            vp.scrollLeft = Math.max(0, (vp.scrollWidth - vp.clientWidth) / 2);
-            vp.scrollTop  = Math.max(0, (vp.scrollHeight - vp.clientHeight) / 2);
-          }
-        });
       };
       const drawImage = (image) => {
         const c = canvasRef.current, ctx = c.getContext("2d");
@@ -239,9 +239,9 @@
         ctx.drawImage(image, 0,0, image.width,image.height, 0,0, c.width,c.height);
       };
 
-      // 画面回転/サイズ変化/ズーム変更でCSSサイズ更新
+      // 画面回転/サイズ変化/ズーム変更でCSSサイズ更新＋中央寄せ
       useEffect(() => {
-        const onResize = () => applyCanvasCssSize(img);
+        const onResize = () => { applyCanvasCssSize(img); centerViewport(); };
         window.addEventListener("resize", onResize);
         return () => window.removeEventListener("resize", onResize);
       }, [img, zoom]);
@@ -284,14 +284,13 @@
         const idx0 = (y * c.width + x) * 4;
 
         const target = [data[idx0], data[idx0+1], data[idx0+2]];
-        theFill:
-        {
-          const fillCol = hexToRgb(colorHex);
-          if (colorDist(target, fillCol) <= 1) break theFill;
-          if (contig) floodFillContiguous(data, c.width, c.height, x, y, target, fillCol, tol);
-          else        floodFillGlobal    (data, c.width, c.height,      target, fillCol, tol);
-          ctx.putImageData(imgData, 0, 0);
-        }
+        const fillCol = hexToRgb(colorHex);
+        if (colorDist(target, fillCol) <= 1) return;
+
+        if (contig) floodFillContiguous(data, c.width, c.height, x, y, target, fillCol, tol);
+        else        floodFillGlobal    (data, c.width, c.height,      target, fillCol, tol);
+
+        ctx.putImageData(imgData, 0, 0);
       };
 
       const replayActions = (actions) => {
@@ -491,7 +490,7 @@
             <div className="rounded-2xl bg-white border shadow p-3">
               <div
                 ref={viewportRef}
-                className="relative overflow-auto rounded-xl"
+                className="relative overflow-auto rounded-xl text-center"
                 style={{maxHeight: 'calc(100vh - 180px)'}}
               >
                 <div className="relative inline-block">
@@ -510,11 +509,23 @@
 
                 {/* ズームコントロール */}
                 <div className="mt-3 mb-1 flex items-center justify-center gap-2 text-sm">
-                  <button className="px-2 py-1 border rounded" onClick={()=>{ setZoom(1); setTimeout(()=>applyCanvasCssSize(img),0); }}>100%</button>
-                  <button className="px-2 py-1 border rounded" onClick={()=>{ setZoom(z=>{ const nz=Math.max(0.5, Math.round((z-0.1)*10)/10); setTimeout(()=>applyCanvasCssSize(img),0); return nz; }); }}>−</button>
+                  <button className="px-2 py-1 border rounded" onClick={() => { setZoom(1); setTimeout(()=>{ applyCanvasCssSize(img); centerViewport(); },0); }}>100%</button>
+                  <button className="px-2 py-1 border rounded" onClick={() => {
+                    setZoom(z => {
+                      const nz = Math.max(0.5, Math.round((z-0.1)*10)/10);
+                      setTimeout(()=>{ applyCanvasCssSize(img); centerViewport(); },0);
+                      return nz;
+                    });
+                  }}>−</button>
                   <div className="px-2">Zoom: {(zoom*100)|0}%</div>
-                  <button className="px-2 py-1 border rounded" onClick={()=>{ setZoom(z=>{ const nz=Math.min(3, Math.round((z+0.1)*10)/10); setTimeout(()=>applyCanvasCssSize(img),0); return nz; }); }}>＋</button>
-                  <button className="px-2 py-1 border rounded" onClick={()=>{ setZoom(1); setTimeout(()=>applyCanvasCssSize(img),0); }}>Fit</button>
+                  <button className="px-2 py-1 border rounded" onClick={() => {
+                    setZoom(z => {
+                      const nz = Math.min(3, Math.round((z+0.1)*10)/10);
+                      setTimeout(()=>{ applyCanvasCssSize(img); centerViewport(); },0);
+                      return nz;
+                    });
+                  }}>＋</button>
+                  <button className="px-2 py-1 border rounded" onClick={() => { setZoom(1); setTimeout(()=>{ applyCanvasCssSize(img); centerViewport(); },0); }}>Fit</button>
                 </div>
               </div>
             </div>
@@ -578,8 +589,43 @@
             </aside>
           </main>
 
+          {/* 使い方（下部ガイド） */}
+          <section className="mx-auto max-w-screen-2xl px-4 pb-4">
+            <div className="rounded-2xl bg-white border shadow p-4">
+              <h2 className="font-semibold mb-2">使い方</h2>
+              <ul className="list-disc ml-5 space-y-1 text-sm">
+                <li><b>画像の読み込み</b>：<code>map.png</code> を同階層に置くと自動表示。別画像は右上の <b>📂 画像を開く</b> から。</li>
+                <li><b>塗りつぶし</b>：画像をタップ/クリック。<b>許容差</b>スライダーで境界のにじみに対応。<b>連結のみ</b>で隣接領域だけ塗る。</li>
+                <li><b>スポイト</b>：<kbd>I</kbd> キーで切替 → 画像上をクリックして色取得（自動で塗りモードへ戻ります）。</li>
+                <li><b>ズーム</b>：Fit / 100% / ±。ズームやリサイズ後は画像がセンターに来ます。ピンチズーム（ブラウザ）も可。</li>
+                <li><b>パン</b>：画像上をドラッグで移動（拡大時や画像が大きい時）。パン直後は誤クリック塗りを自動抑制。</li>
+                <li><b>保存</b>：右上<b>PNG保存</b>で書き出し。塗り履歴は <b>localStorage</b> に自動保存・復元（画像ごとに分離）。</li>
+                <li><b>バックアップ</b>：右パネルの<b>エクスポート/インポート</b>で履歴をJSONとして保存/読み込み。</li>
+              </ul>
+              <div className="mt-3">
+                <h3 className="font-semibold mb-1 text-sm">ショートカット</h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 text-sm">
+                  <ul className="list-disc ml-5 space-y-1">
+                    <li><kbd>F</kbd> 塗りモード</li>
+                    <li><kbd>I</kbd> スポイト</li>
+                    <li><kbd>B</kbd> 塗り/スポイト切替</li>
+                    <li><kbd>[</kbd> / <kbd>]</kbd> 許容差 − / ＋（<kbd>-</kbd>/<kbd>=</kbd>でも可）</li>
+                    <li><kbd>G</kbd> 連結のみ ON/OFF</li>
+                  </ul>
+                  <ul className="list-disc ml-5 space-y-1">
+                    <li><kbd>Ctrl/⌘ + Z</kbd> Undo</li>
+                    <li><kbd>Ctrl/⌘ + Shift + Z</kbd> または <kbd>Y</kbd> Redo</li>
+                    <li><kbd>S</kbd> PNG保存</li>
+                    <li><kbd>O</kbd> 画像を開く</li>
+                    <li><kbd>R</kbd> 状態クリア（元画像へ）</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </section>
+
           <footer className="py-5 text-center text-xs text-gray-500">
-            画像は端末内でのみ処理されます（PNG保存）。塗り状態は localStorage に保存・復元。スマホはフル幅表示、ズーム＆パン対応。
+            画像は端末内でのみ処理されます。塗り状態は localStorage に保存・復元。スマホはフル幅表示、ズーム＆パン対応、常時センター表示。
           </footer>
         </div>
       );
