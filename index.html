@@ -10,7 +10,7 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <style>
     html,body { height: 100%; }
-    .touch-none { touch-action: none; } /* 独自パン用 */
+    .touch-none { touch-action: none; } /* 独自パン/ピンチ用（ブラウザのページズームを抑止） */
     kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;background:#f5f5f5;border:1px solid #ddd;border-bottom-width:2px;padding:2px 6px;border-radius:6px;font-size:12px;}
     .btn-compact{ padding:6px 10px; border-radius:12px; border:1px solid #e5e7eb; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.04); }
     .icon-label{ display:none; }          /* モバイルはアイコンのみ */
@@ -61,7 +61,7 @@
       const canvasRef = useRef(null);
       const overlayRef = useRef(null);
       const fileInputRef = useRef(null);
-      const viewportRef = useRef(null); // パン対象のスクロール領域
+      const viewportRef = useRef(null); // パン/ピンチ対象のスクロール領域
 
       const [img, setImg] = useState(null);
       const [imageKey, setImageKey] = useState(null);
@@ -80,10 +80,14 @@
       const [redoStack, setRedoStack] = useState([]);
       const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
 
-      // パン用
+      // パン
       const [isPanning, setIsPanning] = useState(false);
       const panStateRef = useRef({ startX:0, startY:0, scrollL:0, scrollT:0, moved:false, pointerId:null });
-      const suppressClickRef = useRef(false); // パン後の誤クリック塗り抑制
+      const suppressClickRef = useRef(false); // パン直後の誤クリック塗り抑制
+
+      // ピンチ（2本指ズーム）
+      const pointersRef = useRef(new Map()); // id -> {x,y}
+      const pinchRef = useRef(null); // {startDist, startZoom, startCssW, startCssH, startScrollL, startScrollT, midClient:{x,y}}
 
       // 初期画像ロード
       useEffect(() => {
@@ -179,7 +183,7 @@
         overlay.style.height = cssH + "px";
       };
 
-      // ★ 中央寄せスクロール
+      // ★ スクロール中央寄せ
       const centerViewport = () => {
         const vp = viewportRef.current;
         if (!vp) return;
@@ -351,41 +355,118 @@
         }
       };
 
-      // パン（ドラッグスクロール）
+      // ===== パン（ドラッグスクロール） =====
       const canPan = () => {
         const vp = viewportRef.current;
         if (!vp) return false;
         return vp.scrollWidth > vp.clientWidth || vp.scrollHeight > vp.clientHeight || zoom > 1;
       };
       const onPointerDown = (e) => {
-        if (!canPan()) return;
-        const vp = viewportRef.current;
-        panStateRef.current = {
-          startX: e.clientX,
-          startY: e.clientY,
-          scrollL: vp.scrollLeft,
-          scrollT: vp.scrollTop,
-          moved: false,
-          pointerId: e.pointerId
-        };
-        e.currentTarget.setPointerCapture(e.pointerId);
-        setIsPanning(true);
+        // ピンチのため pointer を記録
+        pointersRef.current.set(e.pointerId, {x:e.clientX, y:e.clientY});
+
+        if (pointersRef.current.size === 2) {
+          // ピンチ開始
+          const vp = viewportRef.current;
+          const pts = Array.from(pointersRef.current.values());
+          const dx = pts[0].x - pts[1].x, dy = pts[0].y - pts[1].y;
+          const dist = Math.hypot(dx, dy);
+          const mid = { x:(pts[0].x+pts[1].x)/2, y:(pts[0].y+pts[1].y)/2 };
+          const canvasRect = canvasRef.current.getBoundingClientRect();
+          pinchRef.current = {
+            startDist: Math.max(1, dist),
+            startZoom: zoom,
+            startCssW: canvasRect.width,
+            startCssH: canvasRect.height,
+            startScrollL: vp.scrollLeft,
+            startScrollT: vp.scrollTop,
+            midClient: mid
+          };
+        } else if (pointersRef.current.size === 1 && canPan()) {
+          // パン開始
+          const vp = viewportRef.current;
+          panStateRef.current = {
+            startX: e.clientX,
+            startY: e.clientY,
+            scrollL: vp.scrollLeft,
+            scrollT: vp.scrollTop,
+            moved: false,
+            pointerId: e.pointerId
+          };
+          e.currentTarget.setPointerCapture(e.pointerId);
+          setIsPanning(true);
+        }
       };
       const onPointerMove = (e) => {
-        if (!isPanning) return;
-        const vp = viewportRef.current;
-        const st = panStateRef.current;
-        const dx = e.clientX - st.startX;
-        const dy = e.clientY - st.startY;
-        if (Math.abs(dx) + Math.abs(dy) > 3) st.moved = true;
-        vp.scrollLeft = st.scrollL - dx;
-        vp.scrollTop  = st.scrollT - dy;
+        // 更新
+        if (pointersRef.current.has(e.pointerId)) {
+          pointersRef.current.set(e.pointerId, {x:e.clientX, y:e.clientY});
+        }
+
+        // ピンチ中（2本指）
+        if (pointersRef.current.size === 2 && pinchRef.current) {
+          const vp = viewportRef.current;
+          const pts = Array.from(pointersRef.current.values());
+          const dx = pts[0].x - pts[1].x, dy = pts[0].y - pts[1].y;
+          const dist = Math.hypot(dx, dy);
+          const scale = Math.max(0.5, Math.min(3, pinchRef.current.startZoom * (dist / pinchRef.current.startDist)));
+
+          // いったん倍率更新
+          setZoom(scale);
+          // CSSサイズを適用
+          applyCanvasCssSize(img);
+
+          // ピンチ中心をできるだけ固定するようスクロール補正
+          const vpRect = vp.getBoundingClientRect();
+          const cx = pinchRef.current.midClient.x - vpRect.left; // ビューポート内ピンチ中心
+          const cy = pinchRef.current.midClient.y - vpRect.top;
+
+          const oldW = pinchRef.current.startCssW;
+          const oldH = pinchRef.current.startCssH;
+          const newRect = canvasRef.current.getBoundingClientRect();
+          const newW = newRect.width;
+          const newH = newRect.height;
+
+          const scaleRatioX = newW / oldW;
+          const scaleRatioY = newH / oldH;
+
+          // ピンチ中心の「内容座標」を推定してスクロール調整
+          const contentX = pinchRef.current.startScrollL + cx;
+          const contentY = pinchRef.current.startScrollT + cy;
+          vp.scrollLeft = contentX * scaleRatioX - cx;
+          vp.scrollTop  = contentY * scaleRatioY - cy;
+
+          // パンの誤クリック抑制
+          suppressClickRef.current = true;
+          return;
+        }
+
+        // パン中（1本指）
+        if (isPanning) {
+          const vp = viewportRef.current;
+          const st = panStateRef.current;
+          const dx = e.clientX - st.startX;
+          const dy = e.clientY - st.startY;
+          if (Math.abs(dx) + Math.abs(dy) > 3) st.moved = true;
+          vp.scrollLeft = st.scrollL - dx;
+          vp.scrollTop  = st.scrollT - dy;
+        }
       };
-      const endPan = () => {
-        if (!isPanning) return;
-        const st = panStateRef.current;
-        setIsPanning(false);
-        if (st.moved) suppressClickRef.current = true; // パン直後の誤クリック塗り防止
+      const endPan = (e) => {
+        // pointer 終了
+        pointersRef.current.delete(e.pointerId);
+
+        // ピンチ終了
+        if (pointersRef.current.size < 2 && pinchRef.current) {
+          pinchRef.current = null;
+        }
+
+        // パン終了
+        if (isPanning) {
+          const st = panStateRef.current;
+          setIsPanning(false);
+          if (st.moved) suppressClickRef.current = true; // パン直後の誤クリック塗り防止
+        }
       };
 
       // Undo/Redo
@@ -486,53 +567,55 @@
           </header>
 
           <main className="mx-auto max-w-screen-2xl p-4 grid grid-cols-1 lg:grid-cols-[_1fr_360px] gap-6">
-            {/* 左：キャンバス（パン対応スクロール領域） */}
+            {/* 左：キャンバス（パン/ピンチ対応スクロール領域） */}
             <div className="rounded-2xl bg-white border shadow p-3">
               <div
                 ref={viewportRef}
                 className="relative overflow-auto rounded-xl text-center"
                 style={{maxHeight: 'calc(100vh - 180px)'}}
+                onPointerDown={onPointerDown}
+                onPointerMove={onPointerMove}
+                onPointerUp={endPan}
+                onPointerCancel={endPan}
+                onPointerLeave={endPan}
               >
                 <div className="relative inline-block">
                   <canvas
                     ref={canvasRef}
                     className={"rounded-xl shadow border select-none touch-none " + (canPan() ? (isPanning ? "cursor-grabbing" : "cursor-grab") : "cursor-crosshair")}
                     onClick={handleCanvasClick}
-                    onPointerDown={onPointerDown}
-                    onPointerMove={onPointerMove}
-                    onPointerUp={endPan}
-                    onPointerCancel={endPan}
-                    onPointerLeave={endPan}
                   />
                   <canvas ref={overlayRef} className="absolute inset-0 pointer-events-none rounded-xl" />
                 </div>
 
-                {/* ズームコントロール */}
-                <div className="mt-3 mb-1 flex items-center justify-center gap-2 text-sm">
-                  <button className="px-2 py-1 border rounded" onClick={() => { setZoom(1); setTimeout(()=>{ applyCanvasCssSize(img); centerViewport(); },0); }}>100%</button>
-                  <button className="px-2 py-1 border rounded" onClick={() => {
-                    setZoom(z => {
-                      const nz = Math.max(0.5, Math.round((z-0.1)*10)/10);
-                      setTimeout(()=>{ applyCanvasCssSize(img); centerViewport(); },0);
-                      return nz;
-                    });
-                  }}>−</button>
-                  <div className="px-2">Zoom: {(zoom*100)|0}%</div>
-                  <button className="px-2 py-1 border rounded" onClick={() => {
-                    setZoom(z => {
-                      const nz = Math.min(3, Math.round((z+0.1)*10)/10);
-                      setTimeout(()=>{ applyCanvasCssSize(img); centerViewport(); },0);
-                      return nz;
-                    });
-                  }}>＋</button>
-                  <button className="px-2 py-1 border rounded" onClick={() => { setZoom(1); setTimeout(()=>{ applyCanvasCssSize(img); centerViewport(); },0); }}>Fit</button>
+                {/* ★ 固定HUD（スクロールしても位置がズレない） */}
+                <div className="sticky bottom-2 left-0 right-0 flex justify-center pointer-events-none">
+                  <div className="pointer-events-auto inline-flex items-center gap-2 px-3 py-1.5 rounded-full border bg-white/90 shadow text-sm">
+                    <span>Zoom: {(zoom*100)|0}%</span>
+                    <button className="px-2 py-0.5 border rounded" onClick={() => { setZoom(1); setTimeout(()=>{ applyCanvasCssSize(img); centerViewport(); },0); }}>100%</button>
+                    <button className="px-2 py-0.5 border rounded" onClick={() => {
+                      setZoom(z => {
+                        const nz = Math.max(0.5, Math.round((z-0.1)*10)/10);
+                        setTimeout(()=>{ applyCanvasCssSize(img); centerViewport(); },0);
+                        return nz;
+                      });
+                    }}>−</button>
+                    <button className="px-2 py-0.5 border rounded" onClick={() => {
+                      setZoom(z => {
+                        const nz = Math.min(3, Math.round((z+0.1)*10)/10);
+                        setTimeout(()=>{ applyCanvasCssSize(img); centerViewport(); },0);
+                        return nz;
+                      });
+                    }}>＋</button>
+                    <button className="px-2 py-0.5 border rounded" onClick={() => { setZoom(1); setTimeout(()=>{ applyCanvasCssSize(img); centerViewport(); },0); }}>Fit</button>
+                  </div>
                 </div>
               </div>
             </div>
 
             {/* 右：コントロール */}
             <aside className="rounded-2xl bg-white border shadow p-4 flex flex-col gap-5">
-              <div className="text-xs text-gray-500">保存先: localStorage（画像ごとに分離）／ドラッグでパン、ピンチでページ拡大も可</div>
+              <div className="text-xs text-gray-500">保存先: localStorage（画像ごとに分離）／ドラッグでパン、<b>2本指ピンチで拡大縮小</b>（HUD固定）。</div>
 
               <div>
                 <div className="text-sm font-semibold mb-1">現在の色</div>
@@ -596,10 +679,10 @@
               <ul className="list-disc ml-5 space-y-1 text-sm">
                 <li><b>画像の読み込み</b>：<code>map.png</code> を同階層に置くと自動表示。別画像は右上の <b>📂 画像を開く</b> から。</li>
                 <li><b>塗りつぶし</b>：画像をタップ/クリック。<b>許容差</b>スライダーで境界のにじみに対応。<b>連結のみ</b>で隣接領域だけ塗る。</li>
-                <li><b>スポイト</b>：<kbd>I</kbd> キーで切替 → 画像上をクリックして色取得（自動で塗りモードへ戻ります）。</li>
-                <li><b>ズーム</b>：Fit / 100% / ±。ズームやリサイズ後は画像がセンターに来ます。ピンチズーム（ブラウザ）も可。</li>
+                <li><b>スポイト</b>：<kbd>I</kbd> キーで切替 → 画像上をクリックして色取得（自動で塗りモードへ）。</li>
+                <li><b>ズーム</b>：<b>2本指ピンチ</b>、または HUD の Fit / 100% / ±。ズームやリサイズ後は画像がセンターに来ます。</li>
                 <li><b>パン</b>：画像上をドラッグで移動（拡大時や画像が大きい時）。パン直後は誤クリック塗りを自動抑制。</li>
-                <li><b>保存</b>：右上<b>PNG保存</b>で書き出し。塗り履歴は <b>localStorage</b> に自動保存・復元（画像ごとに分離）。</li>
+                <li><b>保存</b>：右上<b>PNG保存</b>で書き出し。塗り履歴は <b>localStorage</b> に自動保存・復元（画像ごと）。</li>
                 <li><b>バックアップ</b>：右パネルの<b>エクスポート/インポート</b>で履歴をJSONとして保存/読み込み。</li>
               </ul>
               <div className="mt-3">
@@ -625,7 +708,7 @@
           </section>
 
           <footer className="py-5 text-center text-xs text-gray-500">
-            画像は端末内でのみ処理されます。塗り状態は localStorage に保存・復元。スマホはフル幅表示、ズーム＆パン対応、常時センター表示。
+            画像は端末内でのみ処理されます。塗り状態は localStorage に保存・復元。スマホはフル幅表示、<b>ピンチズーム&パン対応</b>、HUDは固定表示。
           </footer>
         </div>
       );
