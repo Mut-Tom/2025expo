@@ -43,11 +43,8 @@
       del(key){ localStorage.removeItem(key); }
     };
 
-    // 画像ごとのキーを作る（URL + 幅x高さ をハッシュ化）
-    const hashStr = (s) => { // djb2
-      let h = 5381; for (let i=0;i<s.length;i++) h = ((h<<5)+h) + s.charCodeAt(i);
-      return (h>>>0).toString(16);
-    };
+    // 画像ごとのキー（URL/ファイル名 + サイズ）をハッシュ化
+    const hashStr = (s) => { let h = 5381; for (let i=0;i<s.length;i++) h = ((h<<5)+h) + s.charCodeAt(i); return (h>>>0).toString(16); };
 
     // 共通キー名
     const LS_COLOR      = "mf_color";
@@ -62,13 +59,16 @@
       const [img, setImg] = useState(null);
       const [imageKey, setImageKey] = useState(null); // 画像ごとの履歴キー
 
+      // 表示倍率（CSSのみ。内部ピクセルは原寸で保持）
+      const [zoom, setZoom] = useState(1);
+
       // 色（復元）
       const [color, setColor] = useState(LS.get(LS_COLOR, "#e60012"));
       const [recentColors, setRecentColors] = useState(LS.get(LS_RECENT, [])); // 先頭が最新
 
       const [tolerance, setTolerance] = useState(28);
       const [contiguous, setContiguous] = useState(true);
-      const [mode, setMode] = useState("fill"); // F/I/Bで切替
+      const [mode, setMode] = useState("fill"); // F/I/Bで切替（UIは出さない）
       const [undoStack, setUndoStack] = useState([]);
       const [redoStack, setRedoStack] = useState([]);
       const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
@@ -132,6 +132,44 @@
         });
       }, [color]);
 
+      // ====== レイアウト：スマホ最適化（CSS幅で縮放） ======
+      const getMaxCanvasCssWidth = () => {
+        // 外側 padding: p-6 => 24px*2, カード内 p-4 => 16px*2, カラム gap-6 => 24px
+        const outerPadding = 24 * 2;
+        const cardPadding  = 16 * 2;
+        const gap = 24;
+        const isDesktop = window.matchMedia("(min-width: 1024px)").matches; // lg以上
+        const viewport = Math.min(window.innerWidth, 1536); // max-w-screen-2xl 相当
+
+        if (isDesktop) {
+          // 2カラム（右にサイドバー ~360px）
+          return Math.max(240, viewport - 360 - gap - outerPadding - cardPadding);
+        } else {
+          // 1カラム（サイドバーは下）→ フル幅からパディングだけ
+          return Math.max(240, viewport - outerPadding - cardPadding);
+        }
+      };
+
+      const applyCanvasCssSize = (imageOrNull) => {
+        const canvas  = canvasRef.current;
+        const overlay = overlayRef.current;
+        if (!canvas || !overlay) return;
+
+        const imgW = imageOrNull?.width  ?? canvas.width;
+        const imgH = imageOrNull?.height ?? canvas.height;
+
+        const maxCssW = getMaxCanvasCssWidth();
+        const baseRatio = Math.min(1, maxCssW / imgW);
+        const ratio = baseRatio * zoom;
+
+        const cssW = Math.round(imgW * ratio);
+        const cssH = Math.round(imgH * ratio);
+        canvas.style.width  = cssW + "px";
+        canvas.style.height = cssH + "px";
+        overlay.style.width  = cssW + "px";
+        overlay.style.height = cssH + "px";
+      };
+
       // ====== 画像入出力 ======
       const loadFile = (file) => {
         const reader = new FileReader();
@@ -152,15 +190,27 @@
       });
       const afterImageLoaded = (image, srcHint) => {
         setImg(image);
-        layoutToViewport(image);
+
+        // 内部ピクセルは原寸で持つ（高精細）
+        const canvas  = canvasRef.current;
+        const overlay = overlayRef.current;
+        canvas.width = image.width;
+        canvas.height = image.height;
+        overlay.width = image.width;
+        overlay.height = image.height;
+        setCanvasSize({ w: image.width, h: image.height });
+
         drawImage(image);
         setUndoStack([]);
         setRedoStack([]);
 
-        // 画像ごとのキーを決定
+        // 画像ごとのキー
         const keySeed = (srcHint || image.src) + `@${image.width}x${image.height}`;
         const key = LS_ACTIONS_NS + hashStr(keySeed);
         setImageKey(key);
+
+        // CSS表示サイズを適用（スマホ対応）
+        applyCanvasCssSize(image);
 
         // 保存済み履歴があれば再生
         const saved = LS.get(key, []);
@@ -171,16 +221,13 @@
         ctx.clearRect(0,0,c.width,c.height); ctx.imageSmoothingEnabled = true;
         ctx.drawImage(image, 0,0, image.width,image.height, 0,0, c.width,c.height);
       };
-      const layoutToViewport = (image) => {
-        const maxW = Math.min(window.innerWidth - 360, 1400);
-        const ratio = Math.min(1, maxW / image.width);
-        const w = Math.round(image.width * ratio), h = Math.round(image.height * ratio);
-        const c = canvasRef.current, o = overlayRef.current;
-        c.width = image.width; c.height = image.height; o.width = image.width; o.height = image.height;
-        c.style.width = w + "px"; c.style.height = h + "px";
-        o.style.width = w + "px"; o.style.height = h + "px";
-        setCanvasSize({ w: image.width, h: image.height });
-      };
+
+      // 画面回転/サイズ変化/ズーム変更でCSSサイズ更新
+      useEffect(() => {
+        const onResize = () => applyCanvasCssSize(img);
+        window.addEventListener("resize", onResize);
+        return () => window.removeEventListener("resize", onResize);
+      }, [img, zoom]);
 
       // ====== ピクセル/色ユーティリティ ======
       const getImageXY = (evt) => {
@@ -302,7 +349,6 @@
         setUndoStack(prev => { if(!prev.length) return prev;
           setRedoStack(r => [...r, ctx.getImageData(0,0,c.width,c.height)]);
           const last = prev[prev.length-1]; ctx.putImageData(last,0,0);
-          // localStorage 側の履歴も1件戻す
           if (imageKey) {
             const log = LS.get(imageKey, []);
             if (log.length) { log.pop(); LS.set(imageKey, log); }
@@ -352,9 +398,7 @@
           try {
             const data = JSON.parse(reader.result);
             if (!data || !Array.isArray(data.actions)) throw new Error("invalid json");
-            // 別画像キーのデータでも、今の画像に上書き適用して保存
             LS.set(imageKey, data.actions);
-            // 再描画
             drawImage(img);
             replayActions(data.actions);
           } catch (e) {
@@ -380,7 +424,7 @@
           </header>
 
           <main className="mx-auto max-w-screen-2xl p-6 grid grid-cols-1 lg:grid-cols-[_1fr_380px] gap-6">
-            <div className="relative rounded-2xl bg-white border shadow overflow-auto p-4 flex justify-center">
+            <div className="relative rounded-2xl bg-white border shadow overflow-auto p-4 flex flex-col items-center">
               <div className="relative">
                 <canvas ref={canvasRef} className="rounded-xl shadow border select-none touch-none" onClick={handleCanvasClick} />
                 <canvas ref={overlayRef} className="absolute inset-0 pointer-events-none rounded-xl" />
@@ -390,6 +434,15 @@
                     <div className="text-sm">`{DEFAULT_IMAGE}` を index.html と同じ階層に置くか、右上「画像を開く」から読み込んでください。<br/>または <code>?img=ファイル名.png</code> / <code>?img=https://...</code> をURLに付けて開けます。</div>
                   </div>
                 )}
+              </div>
+
+              {/* ズームコントロール */}
+              <div className="mt-3 flex items-center justify-center gap-2 text-sm">
+                <button className="px-2 py-1 border rounded" onClick={()=>{ setZoom(1); setTimeout(()=>applyCanvasCssSize(img),0); }}>100%</button>
+                <button className="px-2 py-1 border rounded" onClick={()=>{ setZoom(z=>{ const nz=Math.max(0.5, Math.round((z-0.1)*10)/10); setTimeout(()=>applyCanvasCssSize(img),0); return nz; }); }}>−</button>
+                <div className="px-2">Zoom: {(zoom*100)|0}%</div>
+                <button className="px-2 py-1 border rounded" onClick={()=>{ setZoom(z=>{ const nz=Math.min(3, Math.round((z+0.1)*10)/10); setTimeout(()=>applyCanvasCssSize(img),0); return nz; }); }}>＋</button>
+                <button className="px-2 py-1 border rounded" onClick={()=>{ setZoom(1); setTimeout(()=>applyCanvasCssSize(img),0); }}>Fit</button>
               </div>
             </div>
 
@@ -453,7 +506,7 @@
           </main>
 
           <footer className="py-6 text-center text-xs text-gray-500">
-            画像は端末内でのみ処理されます（PNG保存対応）。塗り状態は localStorage に操作履歴として保存・復元します。
+            画像は端末内でのみ処理されます（PNG保存）。塗り状態は localStorage に操作履歴として保存・復元します。スマホはフル幅表示＆ズーム対応。
           </footer>
         </div>
       );
