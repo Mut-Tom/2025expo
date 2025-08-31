@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
-  <!-- ページ全体のピンチズームを無効化 -->
+  <!-- ページのピンチズーム無効化 -->
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>クリック塗りつぶしマップ</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css">
@@ -11,7 +11,7 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <style>
     html,body { height: 100%; }
-    .touch-none { touch-action: none; }
+    .touch-none { touch-action: none; } /* 要素単位でピンチ無効化＆独自パン */
     kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;background:#f5f5f5;border:1px solid #ddd;border-bottom-width:2px;padding:2px 6px;border-radius:6px;font-size:12px;}
     .btn-compact{ padding:6px 10px; border-radius:12px; border:1px solid #e5e7eb; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.04); }
     .icon-label{ display:none; }
@@ -28,7 +28,7 @@
   <script type="text/babel">
     const { useEffect, useRef, useState } = React;
 
-    const DEFAULT_IMAGE = "map.png";
+    const DEFAULT_IMAGE = "map.png"; // リポジトリに map.png を置くと自動表示
 
     const PALETTE_GROUPS = {
       Inochi: ["#e60012", "#0068b7", "#ffffff"],
@@ -64,6 +64,7 @@
       const [recentColors, setRecentColors] = useState(LS.get(LS_RECENT, []));
       const [tolerance, setTolerance] = useState(28);
       const [contiguous, setContiguous] = useState(true);
+      const [mode, setMode] = useState("fill"); // "fill" | "eyedropper"
       const [undoStack, setUndoStack] = useState([]);
       const [redoStack, setRedoStack] = useState([]);
       const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
@@ -72,10 +73,10 @@
       const panStateRef = useRef({ startX:0, startY:0, scrollL:0, scrollT:0, moved:false, pointerId:null });
       const suppressClickRef = useRef(false);
 
-      // ===== ページの二本指ピンチズームを抑止 =====
+      // ===== ページ側ピンチズーム無効化 =====
       useEffect(() => {
         const stopWheelZoom = (e) => { if (e.ctrlKey || e.metaKey) e.preventDefault(); };
-        const stopGesture = (e) => { e.preventDefault(); };
+        const stopGesture = (e) => { e.preventDefault(); }; // iOS Safari
         document.addEventListener('wheel', stopWheelZoom, { passive: false });
         document.addEventListener('gesturestart', stopGesture, { passive: false });
         document.addEventListener('gesturechange', stopGesture, { passive: false });
@@ -88,23 +89,116 @@
         };
       }, []);
 
+      // ===== ズーム =====
       const clampZoom = (z) => Math.min(3, Math.max(0.5, +z.toFixed(3)));
-      const updateZoom = (nextZoom) => {
+      const updateZoom = (nextZoom, anchorClient=null) => {
         const nz = clampZoom(nextZoom);
+        const vp = viewportRef.current;
+        const cnv = canvasRef.current;
+        if (!vp || !cnv) { setZoom(nz); return; }
+
+        const vpRect = vp.getBoundingClientRect();
+        const cx = anchorClient ? (anchorClient.x - vpRect.left) : vpRect.width/2;
+        const cy = anchorClient ? (anchorClient.y - vpRect.top)  : vpRect.height/2;
+
+        const oldRect = cnv.getBoundingClientRect();
+        const oldW = oldRect.width, oldH = oldRect.height;
+        const contentX = vp.scrollLeft + cx;
+        const contentY = vp.scrollTop  + cy;
+
         setZoom(nz);
         applyCanvasCssSize(img);
+
+        const newRect = cnv.getBoundingClientRect();
+        const scaleX = newRect.width / (oldW || 1);
+        const scaleY = newRect.height / (oldH || 1);
+
+        vp.scrollLeft = contentX * scaleX - cx;
+        vp.scrollTop  = contentY * scaleY - cy;
       };
 
-      // 初期ロード
+      // 初期画像ロード（?img= クエリ優先 → 無ければ DEFAULT_IMAGE）
+      const getImgFromQuery = () => {
+        const p = new URLSearchParams(location.search);
+        const v = p.get("img");
+        return v && v.trim() ? v.trim() : null;
+      };
       useEffect(() => {
-        const image = new Image();
-        image.onload = () => afterImageLoaded(image, DEFAULT_IMAGE);
-        image.src = DEFAULT_IMAGE;
+        const first = getImgFromQuery() || DEFAULT_IMAGE;
+        autoLoadImage(first).catch(() => console.warn("自動読み込み用の画像が見つかりません:", first));
       }, []);
 
+      // 画像 D&D
+      useEffect(() => {
+        const onDrop = (e) => { e.preventDefault(); const f = e.dataTransfer?.files?.[0]; if (f) loadFile(f); };
+        const onDrag = (e) => e.preventDefault();
+        window.addEventListener("drop", onDrop);
+        window.addEventListener("dragover", onDrag);
+        return () => { window.removeEventListener("drop", onDrop); window.removeEventListener("dragover", onDrag); };
+      }, []);
+
+      // ショートカット
+      useEffect(() => {
+        const isEditable = (el) => {
+          if (!el) return false;
+          const tag = el.tagName?.toLowerCase();
+          return tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable;
+        };
+        const clampTol = (v) => Math.max(0, Math.min(128, v));
+        const onKeyDown = (e) => {
+          if (isEditable(document.activeElement)) return;
+          const ctrl = e.ctrlKey || e.metaKey;
+          const shift = e.shiftKey;
+          const key = e.key;
+
+          if (ctrl && key.toLowerCase() === "z" && !shift) { e.preventDefault(); undo(); return; }
+          if ((ctrl && key.toLowerCase() === "y") || (ctrl && key.toLowerCase() === "z" && shift)) { e.preventDefault(); redo(); return; }
+
+          if (!ctrl && !shift && key.toLowerCase() === "f") { setMode("fill"); return; }
+          if (!ctrl && !shift && key.toLowerCase() === "i") { setMode("eyedropper"); return; }
+          if (!ctrl && !shift && key.toLowerCase() === "b") { setMode(m => m==="fill" ? "eyedropper" : "fill"); return; }
+
+          if (!ctrl && !shift && key.toLowerCase() === "s") { e.preventDefault(); savePng(); return; }
+          if (!ctrl && !shift && key.toLowerCase() === "o") { e.preventDefault(); handleOpen(); return; }
+          if (!ctrl && !shift && key.toLowerCase() === "r") { e.preventDefault(); clearToOriginal(); return; }
+
+          if (!ctrl && !shift && key.toLowerCase() === "g") { setContiguous(v => !v); return; }
+
+          if (key === "[" || key === "-") { setTolerance(v => clampTol(v - 4)); return; }
+          if (key === "]" || key === "=" || key === "+") { setTolerance(v => clampTol(v + 4)); return; }
+        };
+        window.addEventListener("keydown", onKeyDown, { passive: false });
+        return () => window.removeEventListener("keydown", onKeyDown);
+      }, [undoStack, redoStack]);
+
+      // 色の保存＆最近色
+      useEffect(() => {
+        LS.set(LS_COLOR, color);
+        setRecentColors((prev) => {
+          const next = [color, ...prev.filter(c => c !== color)].slice(0, 12);
+          LS.set(LS_RECENT, next);
+          return next;
+        });
+      }, [color]);
+
+      // zoom → 入力欄反映
+      useEffect(() => {
+        setZoomInput(String(Math.round(zoom * 100)));
+      }, [zoom]);
+
+      // レイアウト（CSS拡大のみ）
       const getMaxCanvasCssWidth = () => {
+        const outerPadding = 24 * 2;
+        const cardPadding  = 16 * 2;
+        const gap = 24;
+        const isDesktop = window.matchMedia("(min-width: 1024px)").matches;
         const viewport = Math.min(window.innerWidth, 1536);
-        return Math.max(240, viewport - 120);
+
+        if (isDesktop) {
+          return Math.max(240, viewport - 360 - gap - outerPadding - cardPadding);
+        } else {
+          return Math.max(240, viewport - outerPadding - cardPadding);
+        }
       };
 
       const applyCanvasCssSize = (imageOrNull) => {
@@ -116,7 +210,7 @@
         const imgH = imageOrNull?.height ?? canvas.height;
 
         const maxCssW = getMaxCanvasCssWidth();
-        const baseRatio = Math.min(1, maxCssW / imgW); // 修正済み
+        const baseRatio = Math.min(1, maxCssW / imgW); // ← 修正済み
         const ratio = baseRatio * zoom;
 
         const cssW = Math.round(imgW * ratio);
@@ -129,24 +223,290 @@
         }
       };
 
+      const centerViewport = () => {
+        const vp = viewportRef.current;
+        if (!vp) return;
+        vp.scrollLeft = Math.max(0, (vp.scrollWidth  - vp.clientWidth)  / 2);
+        vp.scrollTop  = Math.max(0, (vp.scrollHeight - vp.clientHeight) / 2);
+      };
+
+      // 画像 I/O
+      const loadFile = (file) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const image = new Image();
+          image.onload = () => afterImageLoaded(image, file.name || "file");
+          image.src = reader.result;
+        };
+        reader.readAsDataURL(file);
+      };
+      const autoLoadImage = (url) => new Promise((resolve, reject) => {
+        if (!url) return reject();
+        const image = new Image();
+        image.crossOrigin = "anonymous";
+        image.onload = () => { afterImageLoaded(image, url); resolve(); };
+        image.onerror = reject;
+        image.src = url;
+      });
+
       const afterImageLoaded = (image, srcHint) => {
         setImg(image);
+
         const canvas  = canvasRef.current;
         const overlay = overlayRef.current;
         canvas.width = image.width;
         canvas.height = image.height;
         if (overlay) { overlay.width = image.width; overlay.height = image.height; }
         setCanvasSize({ w: image.width, h: image.height });
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(image,0,0);
+
+        drawImage(image);
         setUndoStack([]); setRedoStack([]);
 
         const keySeed = (srcHint || image.src) + `@${image.width}x${image.height}`;
-        setImageKey(LS_ACTIONS_NS + hashStr(keySeed));
+        const key = LS_ACTIONS_NS + hashStr(keySeed);
+        setImageKey(key);
+
         applyCanvasCssSize(image);
+        centerViewport();
+
+        const saved = LS.get(key, []);
+        if (saved?.length) replayActions(saved);
       };
 
-      // ===== ズーム入力欄 =====
+      const drawImage = (image) => {
+        const c = canvasRef.current, ctx = c.getContext("2d");
+        ctx.clearRect(0,0,c.width,c.height); ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(image, 0,0, image.width,image.height, 0,0, c.width,c.height);
+      };
+
+      // ウィンドウリサイズ
+      useEffect(() => {
+        const onResize = () => { applyCanvasCssSize(img); centerViewport(); };
+        window.addEventListener("resize", onResize);
+        return () => window.removeEventListener("resize", onResize);
+      }, [img, zoom]);
+
+      // ユーティリティ
+      const getImageXY = (evt) => {
+        const rect = evt.target.getBoundingClientRect();
+        const x = Math.floor(((evt.clientX - rect.left) * (canvasSize.w / rect.width)));
+        const y = Math.floor(((evt.clientY - rect.top) * (canvasSize.h / rect.height)));
+        return { x, y };
+      };
+      const getPixel = (data, idx) => [data[idx], data[idx+1], data[idx+2], data[idx+3]];
+      const colorDist = (a,b) => { const dr=a[0]-b[0], dg=a[1]-b[1], db=a[2]-b[2]; return Math.sqrt(dr*dr+dg*dg+db*db); };
+      const hexToRgb = (hex) => { const m=/^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hex); return [parseInt(m[1],16),parseInt(m[2],16),parseInt(m[3],16)]; };
+      const match = (pix,target,tol) => colorDist(pix,target) <= tol;
+
+      // フィル
+      const floodFillContiguous = (data,w,h,sx,sy,target,fill,tol) => {
+        const visited = new Uint8Array(w*h), q=[[sx,sy]];
+        while(q.length){
+          const [x,y]=q.pop(); if(x<0||y<0||x>=w||y>=h) continue;
+          const idx=(y*w+x)*4; if(visited[y*w+x]) continue;
+          const pix=[data[idx],data[idx+1],data[idx+2]]; if(!match(pix,target,tol)) continue;
+          visited[y*w+x]=1; data[idx]=fill[0]; data[idx+1]=fill[1]; data[idx+2]=fill[2]; data[idx+3]=255;
+          q.push([x+1,y],[x-1,y],[x,y+1],[x,y-1]);
+        }
+      };
+      const floodFillGlobal = (data,w,h,target,fill,tol) => {
+        for(let y=0;y<h;y++){ for(let x=0;x<w;x++){ const idx=(y*w+x)*4;
+          const pix=[data[idx],data[idx+1],data[idx+2]]; if(match(pix,target,tol)){ data[idx]=fill[0]; data[idx+1]=fill[1]; data[idx+2]=fill[2]; data[idx+3]=255; }
+        }}
+      };
+
+      const applyFillAt = ({x, y, colorHex, tol, contig}) => {
+        if (!img) return;
+        const c = canvasRef.current;
+        const ctx = c.getContext("2d", { willReadFrequently: true });
+        const imgData = ctx.getImageData(0,0,c.width,c.height);
+        const data = imgData.data;
+        const idx0 = (y * c.width + x) * 4;
+
+        const target = [data[idx0], data[idx0+1], data[idx0+2]];
+        const fillCol = hexToRgb(colorHex);
+        if (colorDist(target, fillCol) <= 1) return;
+
+        if (contig) floodFillContiguous(data, c.width, c.height, x, y, target, fillCol, tol);
+        else        floodFillGlobal    (data, c.width, c.height,      target, fillCol, tol);
+
+        ctx.putImageData(imgData, 0, 0);
+      };
+
+      const replayActions = (actions) => {
+        if (!actions || !actions.length) return;
+        const c = canvasRef.current;
+        const ctx = c.getContext("2d", { willReadFrequently: true });
+        let imgData = ctx.getImageData(0,0,c.width,c.height);
+        let data = imgData.data;
+        for (const a of actions) {
+          const {x,y,colorHex,tol,contig} = a;
+          const idx0 = (y * c.width + x) * 4;
+          const target = [data[idx0], data[idx0+1], data[idx0+2]];
+          const fillCol = hexToRgb(colorHex);
+          if (colorDist(target, fillCol) <= 1) continue;
+          if (contig) {
+            ctx.putImageData(imgData, 0, 0);
+            applyFillAt({x,y,colorHex,tol,contig});
+            imgData = ctx.getImageData(0,0,c.width,c.height);
+            data = imgData.data;
+          } else {
+            floodFillGlobal(data, c.width, c.height, target, fillCol, tol);
+          }
+        }
+        ctx.putImageData(imgData, 0, 0);
+      };
+
+      // クリック（スポイト/塗り）
+      const handleCanvasClick = (e) => {
+        if (suppressClickRef.current) { suppressClickRef.current = false; return; }
+        if (!img) return;
+
+        const { x, y } = getImageXY(e);
+        const c = canvasRef.current, ctx = c.getContext("2d", { willReadFrequently: true });
+        const imgData = ctx.getImageData(0,0,c.width,c.height), data = imgData.data;
+        const idx0 = (y * c.width + x) * 4;
+
+        if (mode === "eyedropper") {
+          const [r,g,b] = getPixel(data, idx0);
+          setColor("#" + [r,g,b].map(v=>v.toString(16).padStart(2,"0")).join(""));
+          setMode("fill");
+          return;
+        }
+
+        pushUndo();
+
+        const action = { x, y, colorHex: color, tol: tolerance, contig: contiguous };
+        applyFillAt(action);
+
+        if (imageKey) {
+          try {
+            const prev = LS.get(imageKey, []);
+            const next = [...prev, action];
+            LS.set(imageKey, next);
+          } catch (err) {
+            console.warn("localStorage 保存に失敗：", err);
+            alert(`保存容量がいっぱいの可能性があります。右パネルの「エクスポート」で\nバックアップしてから、履歴をクリアしてください。`);
+          }
+        }
+      };
+
+      const canPan = () => {
+        const vp = viewportRef.current;
+        if (!vp) return false;
+        return vp.scrollWidth > vp.clientWidth || vp.scrollHeight > vp.clientHeight || zoom > 1;
+      };
+
+      // ===== パン（ピンチ排除・1本指）=====
+      const onPointerDown = (e) => {
+        e.preventDefault();
+        if (!canPan()) return;
+        const vp = viewportRef.current;
+        panStateRef.current = {
+          startX: e.clientX,
+          startY: e.clientY,
+          scrollL: vp.scrollLeft,
+          scrollT: vp.scrollTop,
+          moved: false,
+          pointerId: e.pointerId
+        };
+        e.currentTarget.setPointerCapture(e.pointerId);
+        setIsPanning(true);
+      };
+      const onPointerMove = (e) => {
+        if (!isPanning) return;
+        e.preventDefault();
+        const vp = viewportRef.current;
+        const st = panStateRef.current;
+        const dx = e.clientX - st.startX;
+        const dy = e.clientY - st.startY;
+        if (Math.abs(dx) + Math.abs(dy) > 3) st.moved = true;
+        vp.scrollLeft = st.scrollL - dx;
+        vp.scrollTop  = st.scrollT - dy;
+      };
+      const endPan = (e) => {
+        if (!isPanning) return;
+        setIsPanning(false);
+        if (panStateRef.current.moved) suppressClickRef.current = true;
+      };
+
+      // ===== PC向け：Ctrl/⌘ + ホイールでアプリ内ズーム（ページズームは抑止） =====
+      const onWheel = (e) => {
+        if (!e.ctrlKey && !e.metaKey) return;
+        e.preventDefault();
+        const factor = Math.exp(-e.deltaY * 0.0015);
+        updateZoom(zoom * factor, { x: e.clientX, y: e.clientY });
+      };
+
+      // Undo/Redo
+      const pushUndo = () => {
+        const c = canvasRef.current, ctx = c.getContext("2d");
+        const snap = ctx.getImageData(0,0,c.width,c.height);
+        setUndoStack(prev => { const next=[...prev, snap]; if(next.length>20) next.shift(); return next; });
+        setRedoStack([]);
+      };
+      const undo = () => {
+        const c = canvasRef.current, ctx = c.getContext("2d");
+        setUndoStack(prev => { if(!prev.length) return prev;
+          setRedoStack(r => [...r, ctx.getImageData(0,0,c.width,c.height)]);
+          const last = prev[prev.length-1]; ctx.putImageData(last,0,0);
+          if (imageKey) {
+            const log = LS.get(imageKey, []);
+            if (log.length) { log.pop(); LS.set(imageKey, log); }
+          }
+          return prev.slice(0,-1);
+        });
+      };
+      const redo = () => {
+        const c = canvasRef.current, ctx = c.getContext("2d");
+        setRedoStack(prev => { if(!prev.length) return prev;
+          setUndoStack(u => [...u, ctx.getImageData(0,0,c.width,c.height)]);
+          const last = prev[prev.length-1]; ctx.putImageData(last,0,0);
+          return prev.slice(0,-1);
+        });
+      };
+
+      const handleOpen = () => fileInputRef.current?.click();
+      const handleFile = (e) => { const f = e.target.files?.[0]; if (f) loadFile(f); };
+      const savePng = () => { const a=document.createElement("a"); a.download="colored-map.png"; a.href=canvasRef.current.toDataURL("image/png"); a.click(); };
+
+      const clearToOriginal = () => {
+        if (!img) return;
+        drawImage(img);
+        setUndoStack([]); setRedoStack([]);
+        if (imageKey) LS.del(imageKey);
+      };
+
+      const exportState = () => {
+        if (!imageKey) return;
+        const data = {
+          imageKey,
+          actions: LS.get(imageKey, []),
+          meta: { ts: Date.now(), tolerance, contiguous }
+        };
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        const a = document.createElement("a");
+        a.download = `mapfill_${imageKey}.json`;
+        a.href = URL.createObjectURL(blob);
+        a.click();
+      };
+      const importState = (file) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const data = JSON.parse(reader.result);
+            if (!data || !Array.isArray(data.actions)) throw new Error("invalid json");
+            LS.set(imageKey, data.actions);
+            drawImage(img);
+            replayActions(data.actions);
+          } catch (e) {
+            alert("インポートに失敗しました。JSON形式をご確認ください。");
+          }
+        };
+        reader.readAsText(file);
+      };
+
+      // ====== 拡大率入力：自由入力＆適用ボタン＆Enter対応 ======
       const applyZoomInput = () => {
         let raw = (zoomInput ?? "").toString().trim().replace(/\s+/g,"");
         if (raw.endsWith("%")) raw = raw.slice(0,-1);
@@ -154,57 +514,171 @@
         if (isNaN(val)) { setZoomInput(String(Math.round(zoom*100))); return; }
         val = Math.max(50, Math.min(300, val));
         setZoomInput(String(val));
-        updateZoom(val/100);
+        updateZoom(val/100); // 画面中心基準
       };
       const onZoomInputKey = (e) => {
-        if (e.key==="Enter"){ e.preventDefault(); applyZoomInput(); }
-        else if (e.key==="Escape"){ setZoomInput(String(Math.round(zoom*100))); e.currentTarget.blur(); }
+        if (e.key === "Enter") { e.preventDefault(); applyZoomInput(); }
+        else if (e.key === "Escape") { setZoomInput(String(Math.round(zoom*100))); e.currentTarget.blur(); }
+        else if (e.key === "ArrowUp") { e.preventDefault(); const v = Math.min(300, (parseInt(zoomInput||"0",10)||0) + 10); setZoomInput(String(v)); }
+        else if (e.key === "ArrowDown") { e.preventDefault(); const v = Math.max(50, (parseInt(zoomInput||"0",10)||0) - 10); setZoomInput(String(v)); }
       };
 
+      // 50%ステップ
       const STEP_FACTOR = 1.5;
 
       return (
         <div className="min-h-screen w-full">
           <header className="sticky top-0 z-20 border-b bg-white/90 backdrop-blur">
-            <div className="mx-auto max-w-screen-2xl px-4 py-2 flex items-center">
+            <div className="mx-auto max-w-screen-2xl px-4 py-2 flex items-center gap-2 flex-wrap">
               <div className="text-lg font-bold">クリックで塗りつぶせるマップ</div>
+              <div className="ml-auto flex items-center gap-1 flex-wrap">
+                <button onClick={handleOpen} className="btn-compact" title="画像を開く (O)">
+                  <span className="icon-only" aria-hidden>📂</span><span className="icon-label"> 画像を開く <span className="text-xs text-gray-500">(O)</span></span>
+                </button>
+                <button onClick={savePng} className="btn-compact" title="PNG保存 (S)">
+                  <span className="icon-only" aria-hidden>💾</span><span className="icon-label"> PNG保存 <span className="text-xs text-gray-500">(S)</span></span>
+                </button>
+                <button onClick={undo} disabled={!undoStack.length} className="btn-compact" title="Undo (⌘/Ctrl+Z)">
+                  <span className="icon-only" aria-hidden>↶</span><span className="icon-label"> Undo <span className="text-xs text-gray-500">(⌘/Ctrl+Z)</span></span>
+                </button>
+                <button onClick={redo} disabled={!redoStack.length} className="btn-compact" title="Redo (⌘/Ctrl+Shift+Z / Y)">
+                  <span className="icon-only" aria-hidden>↷</span><span className="icon-label"> Redo <span className="text-xs text-gray-500">(⌘/Ctrl+Shift+Z / Y)</span></span>
+                </button>
+                <button onClick={clearToOriginal} className="btn-compact" title="状態クリア (R)">
+                  <span className="icon-only" aria-hidden>♻</span><span className="icon-label"> 状態クリア <span className="text-xs text-gray-500">(R)</span></span>
+                </button>
+              </div>
             </div>
           </header>
 
-          <main className="mx-auto max-w-screen-2xl p-4">
+          <main className="mx-auto max-w-screen-2xl p-4 grid grid-cols-1 lg:grid-cols-[_1fr_360px] gap-6">
             <div className="rounded-2xl bg-white border shadow p-3">
-              <div ref={viewportRef} className="relative overflow-auto rounded-xl text-center touch-none">
+              <div
+                ref={viewportRef}
+                className="relative overflow-auto rounded-xl text-center touch-none"
+                style={{maxHeight: 'calc(100vh - 180px)'}}
+                onPointerDown={onPointerDown}
+                onPointerMove={onPointerMove}
+                onPointerUp={endPan}
+                onPointerCancel={endPan}
+                onPointerLeave={endPan}
+                onWheel={onWheel}
+              >
                 <div className="relative inline-block">
-                  <canvas ref={canvasRef} className="rounded-xl border" />
+                  <canvas
+                    ref={canvasRef}
+                    className={"rounded-xl shadow border select-none touch-none " + (canPan() ? (isPanning ? "cursor-grabbing" : "cursor-grab") : "cursor-crosshair")}
+                    onClick={handleCanvasClick}
+                  />
                   <canvas ref={overlayRef} className="absolute inset-0 pointer-events-none rounded-xl" />
                 </div>
 
-                {/* HUD */}
+                {/* 固定HUD（ピンチ無効／自由入力＋適用ボタン） */}
                 <div className="sticky bottom-2 left-0 right-0 flex justify-center pointer-events-none">
                   <div className="pointer-events-auto inline-flex items-center gap-2 px-3 py-1.5 rounded-full border bg-white/90 shadow text-sm">
-                    <button className="px-2 py-0.5 border rounded" onClick={()=>updateZoom(1)}>100%</button>
-                    <button className="px-2 py-0.5 border rounded" onClick={()=>updateZoom(zoom/STEP_FACTOR)}>−</button>
-                    <form onSubmit={(e)=>{e.preventDefault();applyZoomInput();}} className="flex items-center gap-1">
-                      <span>Zoom</span>
+                    <button className="px-2 py-0.5 border rounded" onClick={() => updateZoom(1)}>100%</button>
+                    <button className="px-2 py-0.5 border rounded" onClick={() => updateZoom(zoom / STEP_FACTOR)}>−</button>
+
+                    <form
+                      onSubmit={(e) => { e.preventDefault(); applyZoomInput(); }}
+                      className="flex items-center gap-1"
+                    >
+                      <span className="text-gray-600">Zoom</span>
                       <input
                         className="zoom-input px-2 py-0.5 border rounded"
                         value={zoomInput}
-                        onChange={(e)=>setZoomInput(e.target.value)}
+                        onChange={(e)=> setZoomInput(e.target.value)}  // %付きも一旦許可
                         onKeyDown={onZoomInputKey}
                         onBlur={applyZoomInput}
                         inputMode="numeric"
+                        aria-label="拡大率をパーセントで入力"
                         placeholder="100"
                       />
                       <span>%</span>
                       <button type="submit" className="px-2 py-0.5 border rounded">適用</button>
                     </form>
-                    <button className="px-2 py-0.5 border rounded" onClick={()=>updateZoom(zoom*STEP_FACTOR)}>＋</button>
-                    <button className="px-2 py-0.5 border rounded" onClick={()=>updateZoom(1)}>Fit</button>
+
+                    <button className="px-2 py-0.5 border rounded" onClick={() => updateZoom(zoom * STEP_FACTOR)}>＋</button>
+                    <button className="px-2 py-0.5 border rounded" onClick={() => updateZoom(1)}>Fit</button>
                   </div>
                 </div>
               </div>
             </div>
+
+            <aside className="rounded-2xl bg-white border shadow p-4 flex flex-col gap-5">
+              <div className="text-xs text-gray-500">保存先: localStorage（画像ごとに分離）／ドラッグでパン、<b>二本指ピンチは無効</b>・PCは <b>Ctrl/⌘+ホイール</b> でズーム（HUD固定）。</div>
+
+              <div>
+                <div className="text-sm font-semibold mb-1">現在の色</div>
+                <input type="color" className="w-full h-10 rounded-lg border" value={color} onChange={(e)=>setColor(e.target.value)} />
+              </div>
+
+              <div>
+                <div className="text-sm font-semibold mb-1">最近使った色</div>
+                <div className="grid grid-cols-6 gap-2">
+                  {recentColors.length === 0 ? (
+                    <div className="text-xs text-gray-500 col-span-6">まだありません。色を選んで塗るとここに貯まります。</div>
+                  ) : (
+                    recentColors.map((p,idx)=>(
+                      <button key={p+idx} onClick={()=>setColor(p)} className="h-9 rounded-lg border" style={{background:p}} aria-label={p} title={p}></button>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {Object.entries(PALETTE_GROUPS).map(([label, list]) => (
+                <div key={label}>
+                  <div className="text-sm font-semibold mb-1">{label}</div>
+                  <div className="grid grid-cols-6 gap-2">
+                    {list.map((p,idx)=>(
+                      <button key={p+idx} onClick={()=>setColor(p)} className="h-9 rounded-lg border" style={{background:p}} aria-label={p} title={p}></button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+
+              <div>
+                <div className="text-sm font-semibold mb-1">許容差（輪郭のにじみ対策） <span className="text-xs text-gray-400">[ / ] または - / =</span></div>
+                <input type="range" min="0" max="128" value={tolerance} onChange={(e)=>setTolerance(parseInt(e.target.value))} className="w-full" />
+                <div className="text-xs text-gray-600">現在: {tolerance}</div>
+              </div>
+
+              <div>
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={contiguous} onChange={(e)=>setContiguous(e.target.checked)} />
+                  連結のみを塗る（ON 推奨） <span className="text-xs text-gray-400 ml-1">(G)</span>
+                </label>
+              </div>
+
+              <div className="border-t pt-3 flex items-center gap-2">
+                <button onClick={exportState} className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border text-sm">エクスポート</button>
+                <label className="px-3 py-1.5 rounded-xl shadow bg-white hover:bg-gray-50 border text-sm cursor-pointer">
+                  インポート
+                  <input type="file" accept="application/json" className="hidden" onChange={(e)=>{ const f=e.target.files?.[0]; if(f) importState(f); e.target.value=""; }} />
+                </label>
+                <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFile} />
+              </div>
+            </aside>
           </main>
+
+          <section className="mx-auto max-w-screen-2xl px-4 pb-4">
+            <div className="rounded-2xl bg-white border shadow p-4">
+              <h2 className="font-semibold mb-2">使い方</h2>
+              <ul className="list-disc ml-5 space-y-1 text-sm">
+                <li><b>ズーム</b>：＋／−で <b>50%ずつ</b> 拡大縮小（ページピンチは無効、PC は <b>Ctrl/⌘+ホイール</b>）。<br />中央の欄に <b>50〜300</b>% を入力 → Enter／<b>適用</b>で確定、Esc で取り消し、↑/↓で±10%。</li>
+                <li><b>画像の読み込み</b>：<code>map.png</code> を同階層に置くと自動表示。別画像は右上の <b>📂 画像を開く</b> から。</li>
+                <li><b>塗りつぶし</b>：画像をタップ/クリック。<b>許容差</b>スライダーで境界のにじみに対応。<b>連結のみ</b>で隣接領域だけ塗る。</li>
+                <li><b>スポイト</b>：<kbd>I</kbd> キーで切替 → 画像上をクリックして色取得（自動で塗りモードへ）。</li>
+                <li><b>パン</b>：画像上をドラッグで移動（拡大時や画像が大きい時）。</li>
+                <li><b>保存</b>：右上<b>PNG保存</b>で書き出し。塗り履歴は <b>localStorage</b> に自動保存・復元（画像ごと）。</li>
+                <li><b>バックアップ</b>：右パネルの<b>エクスポート/インポート</b>で履歴をJSONとして保存/読み込み。</li>
+              </ul>
+            </div>
+          </section>
+
+          <footer className="py-5 text-center text-xs text-gray-500">
+            画像は端末内でのみ処理されます。塗り状態は localStorage に保存・復元。スマホはフル幅表示、ページピンチズーム無効、パンのみ。
+          </footer>
         </div>
       );
     }
