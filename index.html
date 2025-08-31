@@ -276,7 +276,7 @@
       const getPixel = (data, idx) => [data[idx], data[idx+1], data[idx+2], data[idx+3]];
       const colorDist = (a,b) => { const dr=a[0]-b[0], dg=a[1]-b[1], db=a[2]-b[2]; return Math.sqrt(dr*dr+dg*dg+db*db); };
       const hexToRgb = (hex) => { const m=/^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hex); return [parseInt(m[1],16),parseInt(m[2],16),parseInt(m[3],16)]; };
-      const match = (pix,target,tol) => colorDist(pix,target,tol) <= tol;
+      const match = (pix,target,tol) => colorDist(pix,target) <= tol;
 
       // フィル
       const floodFillContiguous = (data,w,h,sx,sy,target,fill,tol) => {
@@ -503,7 +503,7 @@
         else if (e.key === "ArrowDown") { e.preventDefault(); const v = Math.max(50, (parseInt(zoomInput||"0",10)||0) - 10); setZoomInput(String(v)); }
       };
 
-      // ここを 1.5（=50%）ステップに変更
+      // 50%ステップ
       const STEP_FACTOR = 1.5;
 
       return (
@@ -641,7 +641,7 @@
             <div className="rounded-2xl bg-white border shadow p-4">
               <h2 className="font-semibold mb-2">使い方</h2>
               <ul className="list-disc ml-5 space-y-1 text-sm">
-                <li><b>ズーム</b>：＋／−で <b>50%ずつ</b> 拡大縮小（または PC は <b>Ctrl/⌘+ホイール</b>）。<br>中央の欄に <b>50〜300</b>% を入力して Enter / フォーカス外れで適用。Escで取り消し、↑/↓で±10%。</li>
+                <li><b>ズーム</b>：＋／−で <b>50%ずつ</b> 拡大縮小（または PC は <b>Ctrl/⌘+ホイール</b>）。<br />中央の欄に <b>50〜300</b>% を入力して Enter / フォーカス外れで適用。Escで取り消し、↑/↓で±10%。</li>
                 <li><b>画像の読み込み</b>：<code>map.png</code> を同階層に置くと自動表示。別画像は右上の <b>📂 画像を開く</b> から。</li>
                 <li><b>塗りつぶし</b>：画像をタップ/クリック。<b>許容差</b>スライダーで境界のにじみに対応。<b>連結のみ</b>で隣接領域だけ塗る。</li>
                 <li><b>スポイト</b>：<kbd>I</kbd> キーで切替 → 画像上をクリックして色取得（自動で塗りモードへ）。</li>
