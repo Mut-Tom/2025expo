@@ -28,7 +28,7 @@
   <script type="text/babel">
     const { useEffect, useRef, useState } = React;
 
-    const DEFAULT_IMAGE = "map.png"; // リポジトリに map.png を置くと自動表示
+    const DEFAULT_IMAGE = "map.png"; // 同階層に map.png があれば自動表示
 
     const PALETTE_GROUPS = {
       Inochi: ["#e60012", "#0068b7", "#ffffff"],
@@ -142,7 +142,7 @@
         const isEditable = (el) => {
           if (!el) return false;
           const tag = el.tagName?.toLowerCase();
-        return tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable;
+          return tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable;
         };
         const clampTol = (v) => Math.max(0, Math.min(128, v));
         const onKeyDown = (e) => {
@@ -193,7 +193,6 @@
         const gap = 24;
         const isDesktop = window.matchMedia("(min-width: 1024px)").matches;
         const viewport = Math.min(window.innerWidth, 1536);
-
         if (isDesktop) {
           return Math.max(240, viewport - 360 - gap - outerPadding - cardPadding);
         } else {
@@ -397,10 +396,11 @@
         return vp.scrollWidth > vp.clientWidth || vp.scrollHeight > vp.clientHeight || zoom > 1;
       };
 
-      // ===== パン（ピンチ排除・1本指）=====
+      // ===== パン（ピンチ排除・1本指）===== クリックを殺さないように修正
       const onPointerDown = (e) => {
-        e.preventDefault();
+        // パンできる時だけデフォルトを抑止（クリックは通す）
         if (!canPan()) return;
+        e.preventDefault();
         const vp = viewportRef.current;
         panStateRef.current = {
           startX: e.clientX,
@@ -413,8 +413,9 @@
         e.currentTarget.setPointerCapture(e.pointerId);
         setIsPanning(true);
       };
+
       const onPointerMove = (e) => {
-        if (!isPanning) return;
+        if (!isPanning) return; // パン中だけ抑止
         e.preventDefault();
         const vp = viewportRef.current;
         const st = panStateRef.current;
@@ -424,6 +425,7 @@
         vp.scrollLeft = st.scrollL - dx;
         vp.scrollTop  = st.scrollT - dy;
       };
+
       const endPan = (e) => {
         if (!isPanning) return;
         setIsPanning(false);
@@ -656,7 +658,7 @@
             <div className="rounded-2xl bg-white border shadow p-4">
               <h2 className="font-semibold mb-2">使い方</h2>
               <ul className="list-disc ml-5 space-y-1 text-sm">
-                <li><b>ズーム</b>：HUD の数値欄に <b>50〜300%</b> を入力 → Enter／<b>適用</b>で確定。PC は <b>Ctrl/⌘+ホイール</b> でも拡大縮小できます。</li>
+                <li><b>ズーム</b>：HUD の数値欄に <b>50〜300%</b> を入力 → Enter／<b>適用</b>で確定。PC は <b>Ctrl/⌘+ホイール</b> でも拡大縮小。</li>
                 <li><b>画像の読み込み</b>：<code>map.png</code> を同階層に置くと自動表示。別画像は右上の <b>📂 画像を開く</b> から。</li>
                 <li><b>塗りつぶし</b>：画像をタップ/クリック。<b>許容差</b>スライダーで境界のにじみに対応。<b>連結のみ</b>で隣接領域だけ塗る。</li>
                 <li><b>スポイト</b>：<kbd>I</kbd> キーで切替 → 画像上をクリックして色取得（自動で塗りモードへ）。</li>
